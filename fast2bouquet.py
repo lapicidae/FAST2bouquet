@@ -9,13 +9,33 @@ import json
 import uuid
 import logging
 from collections import defaultdict
+from PIL import Image, ImageDraw
 from urllib.error import URLError
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-# EPG language constants
-EPG_LANGS = ['all', 'ar', 'br', 'ca', 'cl', 'de', 'dk', 'es', 'fr', 'gb', 'it', 'mx', 'no', 'se', 'us']
+
+# --- Internal Configuration ---
+
+# Pluto TV Specifics
+PLUTOTV_EPG_LANGS = ['all', 'ar', 'br', 'ca', 'cl', 'de', 'dk', 'es', 'fr', 'gb', 'it', 'mx', 'no', 'se', 'us']
+
+# Samsung TV Plus Specifics
+STVP_REGIONS = ['all', 'at', 'ca', 'ch', 'de', 'es', 'fr', 'gb', 'in', 'it', 'kr', 'us']
+STVP_BLACKLIST = [
+    "DE1000002V4",      # SMTOWN
+    "DE3000016Q",       # Sony One Comedy TV
+    "DE300002CL",       # Sony One Comedy HITS
+    "DE300003AV",       # Sony One Thriller TV
+    "DE30000489",       # Sony One Action HITS
+    "DE300005NB",       # Sony One Best Of
+    "DEBC3000002Z5",    # Comedy Mix
+    "DEBC470000128",    # DAZN FAST+
+    "DEBC4700002Z2",    # Entertainment Mix
+    "DEBD700001C5",     # DAZN Rise
+]
+
 
 def parse_args():
     """
@@ -31,31 +51,47 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
+    # Provider group
+    prov_group = parser.add_argument_group("Provider selection")
+    prov_group.add_argument("--provider", choices=["all", "plutotv", "stvp"], default="all", help="Select which service(s) to generate")
+
+    # PlutoTV group
+    plutotv_group = parser.add_argument_group("Pluto TV")
+    plutotv_group.add_argument("--plutotv-provider-name", default="PlutoTV", help="Display name and file prefix for Pluto TV")
+    plutotv_group.add_argument("--plutotv-tid", help="Manual hex transponder ID (auto-generated from provider name if omitted)")
+    plutotv_group.add_argument("--plutotv-source", default="https://api.pluto.tv/v2/channels", help="Pluto TV JSON API URL")
+    plutotv_group.add_argument("--plutotv-id-type", choices=["id", "slug"], default="id", help="Mapping type for EPG: 'id' (UUID) or 'slug' (human readable)")
+
+    # Samsung TV Plus group
+    stvp_group = parser.add_argument_group("Samsung TV Plus")
+    stvp_group.add_argument("--stvp-region", choices=STVP_REGIONS, default="all", help="Regional subset for Samsung TV Plus")
+    stvp_group.add_argument("--stvp-provider-name", default="SamsungTVPlus", help="Display name and file prefix for Samsung TV Plus")
+    stvp_group.add_argument("--stvp-tid", help="Manual hex transponder ID (auto-generated from provider name if omitted)")
+    stvp_group.add_argument("--stvp-source", default="https://i.mjh.nz/SamsungTVPlus/.channels.json", help="Samsung TV Plus JSON API URL")
+    stvp_group.add_argument("--stvp-ignore-blacklist", action="store_true", help="Include all channels, ignoring the internal STVP blacklist")
+
     # Output selection group
     output_group = parser.add_argument_group("Output options")
     output_group.add_argument("-p", "--playlist", help="Create an M3U playlist file and save it in the specified path")
     output_group.add_argument("-P", "--playlist-only", help="Create ONLY an M3U playlist file and save it in the specified path")
-    output_group.add_argument("-o", "--one-bouquet", action="store_true", help="Merge all categories into a single bouquet with markers")
+    output_group.add_argument("-o", "--one-bouquet", action="store_true", help="Merge all categories with markers into a single bouquet per provider")
     output_group.add_argument("-r", "--reverse-bouquets", action="store_true", help="Sort bouquets in reverse alphabetical order (Z-A)")
 
     # Picon group
     picon_group = parser.add_argument_group("Picon settings")
     picon_group.add_argument("-d", "--download-picons", action="store_true", help="Download missing picons")
     picon_group.add_argument("-D", "--download-overwrite-picons", action="store_true", help="Download and overwrite existing picons")
-    picon_group.add_argument("-c", "--picon-color", choices=["color", "solid"], default="color", help="Choose between color or solid white logos")
+    picon_group.add_argument("-c", "--picon-color", choices=["color", "solid"], default="color", help="Choose between color or solid white logos (if available)")
+    picon_group.add_argument("--picon-post-processing", choices=["all", "false", "plutotv", "stvp"], default="stvp", help="Apply slightly rounded corners to picons from the selected provider")
     picon_group.add_argument("-f", "--picon-folder", help="Custom path to the picon directory (overrides default search order)")
 
     # Technical group
     tec_group = parser.add_argument_group("Technical configuration")
-    tec_group.add_argument("-i", "--id-type", choices=["slug", "id"], default="slug", help="Mapping type for EPG: 'slug' (human readable) or 'id' (UUID)")
     tec_group.add_argument("-n", "--not-reload", action="store_true", help="Do not reload the Enigma2 service list after creating the bouquet")
     tec_group.add_argument("-s", "--service-type", default="4097", help="Enigma2 service type: 4097 (GstPlayer). 5001, 5002 and 5003 are used by the ServiceApp plugin and additional players such as ffmpeg + exteplayer3")
 
-    # Advanced group
-    config_group = parser.add_argument_group("Advanced configuration")
-    config_group.add_argument("--source", default="https://api.pluto.tv/v2/channels", help="Alternative Pluto TV JSON API URL")
-    config_group.add_argument("--provider", default="PlutoTV", help="Provider name used for file prefixes and bouquet names")
-    config_group.add_argument("--tid", help="Manual hex transponder ID (auto-generated from provider name if omitted)")
+	# Advanced group
+    # config_group = parser.add_argument_group("Advanced configuration")
 
     # Global switches
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress info messages, only log errors")
@@ -160,7 +196,7 @@ def clean_old_files(bouquet_dir, conf_dir, prefix, channels_file):
     if os.path.exists(c_path):
         os.remove(c_path)
 
-def fetch_channel_data(api_url, id_type, picon_color):
+def fetch_plutotv_data(api_url, id_type, picon_color):
     """
     Fetch and parse channel data from the Pluto TV JSON API.
 
@@ -230,6 +266,55 @@ def fetch_channel_data(api_url, id_type, picon_color):
             "logo_url": logo_url,
             "url": url_mask.format(_id=_id, dev_id=dev_id, sid=session_id)
         })
+    return channels
+
+def fetch_stvp_data(api_url, region, ignore_blacklist=False):
+    """
+    Fetch and parse channel data from the Samsung TV Plus JSON API.
+
+    Parameters
+    ----------
+    api_url : str
+        The URL to the Samsung TV Plus JSON API.
+    region : str
+        The region code to filter channels.
+    ignore_blacklist : bool, optional
+        If True, the internal STVP_BLACKLIST will be ignored. Default is False.
+
+    Returns
+    -------
+    list of dict
+        A list containing dictionaries with channel metadata and stream URLs.
+    """
+    try:
+        # User-agent as requested for Samsung API
+        req = urllib.request.Request(api_url, headers={'User-Agent': 'okhttp/4.12.0'})
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode('utf-8'))
+    except Exception as e:
+        logging.error(f"Error fetching Samsung TV Plus data from {api_url}: {e}")
+        return []
+
+    channels = []
+    regions_to_scan = [region] if region != "all" else [r for r in data["regions"] if r != "all"]
+    
+    for reg_key in regions_to_scan:
+        reg_data = data["regions"].get(reg_key, {})
+        for cid, cdata in reg_data.get("channels", {}).items():
+
+            # Apply blacklist filter
+            if not ignore_blacklist and cid in STVP_BLACKLIST:
+                logging.debug(f"Skipping blacklisted STVP channel: {cid}")
+                continue
+
+            channels.append({
+                "sid": cdata.get("chno", 0),
+                "name": cdata.get("name", "Unknown").strip(),
+                "category": cdata.get("group", "Uncategorized").strip(),
+                "channel_id": cid,                      # Raw ID for EPG matching
+                "logo_url": cdata.get("logo"),
+                "url": f"https://jmp2.uk/stvp-{cid}"    # Prefix for stream URL
+            })
     return channels
 
 def create_m3u_playlist(channels, output_path):
@@ -379,9 +464,9 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
     logging.info(f"EPG channels file created: {channels_file} ({len(xml_entries)} entries).")
     return picon_list
 
-def download_picons(picon_list, picon_folder, overwrite):
+def download_picons(picon_list, picon_folder, overwrite, post_process=False):
     """
-    Download channel logos as picons to a specified directory.
+    Download channel logos as picons and optionally apply image processing.
 
     Parameters
     ----------
@@ -391,6 +476,8 @@ def download_picons(picon_list, picon_folder, overwrite):
         Local directory path for saving picons.
     overwrite : bool
         Whether to overwrite existing files.
+    post_process : bool, optional
+        Whether to apply rounded corners to the downloaded images. Default is False.
     """
     if not picon_list:
         return
@@ -402,10 +489,40 @@ def download_picons(picon_list, picon_folder, overwrite):
             try:
                 with urllib.request.urlopen(url) as r, open(path, 'wb') as f:
                     f.write(r.read())
+                # Apply rounded corners if requested
+                if post_process:
+                    apply_rounded_corners(path)
             except Exception:
                 pass
 
-def create_epg_source(conf_dir, epg_source_file, channels_file, provider):
+def apply_rounded_corners(image_path):
+    """
+    Apply rounded corners to an image following Material Design principles.
+
+    Parameters
+    ----------
+    image_path : str
+        Path to the image file to be processed.
+    """
+    try:
+        with Image.open(image_path).convert("RGBA") as img:
+            # Calculate radius: ~10% of the smaller dimension for Material feel
+            width, height = img.size
+            radius = int(min(width, height) * 0.1)
+            
+            # Create a mask for rounded corners
+            mask = Image.new('L', img.size, 0)
+            draw = ImageDraw.Draw(mask)
+            draw.rounded_rectangle((0, 0, width, height), radius=radius, fill=255)
+            
+            # Apply mask
+            result = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            result.paste(img, (0, 0), mask=mask)
+            result.save(image_path, "PNG")
+    except Exception as e:
+        logging.debug(f"Post-processing failed for {image_path}: {e}")
+
+def create_epg_source(conf_dir, epg_source_file, channels_file, provider_name, service_key, langs):
     """
     Create an XMLTV source file for EPGImport.
 
@@ -417,18 +534,23 @@ def create_epg_source(conf_dir, epg_source_file, channels_file, provider):
         Filename of the generated source XML.
     channels_file : str
         Reference filename of the channels XML.
-    provider : str
-        Name of the provider for the source description.
+    provider_name : str
+        Display name for the source category.
+    service_key : str
+        Key for the URL path (e.g., 'PlutoTV' or 'SamsungTVPlus').
+    langs : list of str
+        List of available language/region codes for the EPG.
     """
     path = os.path.join(conf_dir, epg_source_file)
-    base, mirror = "https://i.mjh.nz/PlutoTV", "https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/PlutoTV"
+    base = f"https://i.mjh.nz/{service_key}"
+    mirror = f"https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/{service_key}"
     try:
         with open(path, 'w', encoding='utf-8') as f:
             f.write('<?xml version="1.0" encoding="utf-8"?>\n<sources>\n')
-            f.write(f'\t<sourcecat sourcecatname="{provider} (Matt Huisman)">\n')
-            for L in EPG_LANGS:
+            f.write(f'\t<sourcecat sourcecatname="{provider_name} (Matt Huisman)">\n')
+            for L in langs:
                 f.write(f'\t\t<source type="gen_xmltv" nocheck="1" channels="{channels_file}">\n'
-                        f'\t\t\t<description>{provider} ({L})</description>\n'
+                        f'\t\t\t<description>{provider_name} ({L})</description>\n'
                         f'\t\t\t<url>{base}/{L}.xml.gz</url>\n'
                         f'\t\t\t<url>{mirror}/{L}.xml.gz</url>\n\t\t</source>\n')
             f.write('\t</sourcecat>\n</sources>\n')
@@ -454,52 +576,79 @@ def main():
     if args.quiet:
         logging.getLogger().setLevel(logging.ERROR)
 
-    # Define central prefix for all file operations
-    prefix = f"userbouquet.iptv_{args.provider}"
-    tid = args.tid or hashlib.md5(args.provider.encode()).hexdigest()[:4]
     conf_dir, bouquet_dir, picon_folder = get_system_paths(args.picon_folder)
     
-    # Updated logging to include Picon path if download is active
-    path_info = f"Target paths:\n  Bouquets -> {bouquet_dir}\n  Config   -> {conf_dir}"
-    if args.download_picons or args.download_overwrite_picons:
-        path_info += f"\n  Picons   -> {picon_folder}"
-    logging.info(path_info)
+    # Collective list for all channels
+    all_channels_for_m3u = []
 
-    c_file, s_file = f"{args.provider}.channels.xml", f"{args.provider}.sources.xml"
+    # Initialize requested services
+    services = []
+    if args.provider in ["all", "plutotv"]:
+        services.append({
+            'id': 'plutotv',
+            'name': args.plutotv_provider_name,
+            'fetch_func': lambda: fetch_plutotv_data(args.plutotv_source, args.plutotv_id_type, args.picon_color),
+            'epg_key': 'PlutoTV',
+            'langs': PLUTOTV_EPG_LANGS
+        })
 
-    logging.info("Fetching channel data from API...")
-    channels = fetch_channel_data(args.source, args.id_type, args.picon_color)
-    if not channels:
-        logging.error("No channels received.")
-        return
+    if args.provider in ["all", "stvp"]:
+        services.append({
+            'id': 'stvp',
+            'name': args.stvp_provider_name,
+            'fetch_func': lambda: fetch_stvp_data(args.stvp_source, args.stvp_region, args.stvp_ignore_blacklist),
+            'epg_key': 'SamsungTVPlus',
+            'langs': STVP_REGIONS
+        })
 
-    # Sort channels by category/SID or SID only based on bouquet mode
-    channels.sort(key=lambda x: (x['category'], x['sid']) if args.one_bouquet else x['sid'])
-    for i, c in enumerate(channels, start=1):
-        c['sid'] = i
+    for srv in services:
+        # Configuration for current provider
+        prefix = f"userbouquet.iptv_{srv['name']}"
 
-    # Handle playlist generation. If playlist-only is set, exit after creation.
+        # Dynamically select the correct TID based on the service name
+        tid_attr = f"{srv['id']}_tid" 
+        manual_tid = getattr(args, tid_attr, None)
+        tid = manual_tid or hashlib.md5(srv['name'].encode()).hexdigest()[:4]
+
+        c_file, s_file = f"{srv['name']}.channels.xml", f"{srv['name']}.sources.xml"
+
+        logging.info(f"Processing provider: {srv['name']} (TID: {tid})")
+        channels = srv['fetch_func']()
+
+        if not channels:
+            logging.warning(f"No channels found for {srv['name']}.")
+            continue
+
+        # Sort by category/chno
+        channels.sort(key=lambda x: (x['category'], x['sid']) if args.one_bouquet else x['sid'])
+        for i, c in enumerate(channels, start=1):
+            c['sid'] = i
+
+        all_channels_for_m3u.extend(channels)
+
+        if args.playlist_only:
+            continue
+
+        clean_old_files(bouquet_dir, conf_dir, prefix, c_file)
+        
+        do_download = args.download_picons or args.download_overwrite_picons
+        picons = process_channels(channels, prefix, tid, args.service_type, bouquet_dir, conf_dir, c_file, 
+                                  do_download, args.one_bouquet, args.reverse_bouquets)
+
+        # Determine if post-processing should be applied for this service
+        post_process_active = args.picon_post_processing in ["all", srv['id']]
+
+        if do_download:
+            download_picons(picons, picon_folder, args.download_overwrite_picons, post_process_active)
+
+        create_epg_source(conf_dir, s_file, c_file, srv['name'], srv['epg_key'], srv['langs'])
+
     if args.playlist_only:
-        create_m3u_playlist(channels, args.playlist_only)
-        logging.info("Playlist-only mode active. Skipping bouquet and EPG creation.")
-        return
+        create_m3u_playlist(all_channels_for_m3u, args.playlist_only)
     elif args.playlist:
-        create_m3u_playlist(channels, args.playlist)
+        create_m3u_playlist(all_channels_for_m3u, args.playlist)
 
-    # Proceed with standard Enigma2 file generation
-    clean_old_files(bouquet_dir, conf_dir, prefix, c_file)
-
-    do_download = args.download_picons or args.download_overwrite_picons
-
-    picons = process_channels(channels, prefix, tid, args.service_type, bouquet_dir, conf_dir, c_file, 
-                              do_download, args.one_bouquet, args.reverse_bouquets)
-
-    if do_download:
-        download_picons(picons, picon_folder, args.download_overwrite_picons)
-
-    create_epg_source(conf_dir, s_file, c_file, args.provider)
-
-    if not args.not_reload:
+    if not args.not_reload and not args.playlist_only:
         reload_enigma2()
 
 if __name__ == "__main__":
