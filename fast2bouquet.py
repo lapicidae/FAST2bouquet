@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-import os
-import re
+import argparse
+import concurrent.futures
 import glob
 import hashlib
-import argparse
-import urllib.request
 import json
-import uuid
 import logging
+import os
+import re
+import urllib.request
+import uuid
 from collections import defaultdict
 from PIL import Image, ImageDraw
 from urllib.error import URLError
@@ -36,6 +37,21 @@ STVP_BLACKLIST = [
     "DEBD700001C5",     # DAZN Rise
 ]
 
+# Rakuten TV Specifics
+RAKUTEN_CLASSIFICATIONS = {
+    "al": 270, "at": 300, "ba": 245, "be": 308, "bg": 269, "ch": 319, "cz": 272,
+    "de": 307, "dk": 283, "ee": 288, "es": 5, "fi": 284, "fr": 23, "gr": 279,
+    "hr": 302, "ie": 41, "is": 287, "it": 36, "jp": 309, "lt": 290, "lu": 74,
+    "me": 259, "mk": 275, "nl": 69, "no": 286, "pl": 277, "pt": 64, "ro": 268,
+    "rs": 266, "se": 282, "sk": 273, "uk": 18,
+}
+RAKUTEN_EPG_URLS = {
+    "de": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_DE_epg.xml",
+    "at": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_AT_epg.xml",
+    "ch": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_CH_epg.xml",
+    "uk": "https://raw.githubusercontent.com/dp247/rakuten-uk-epg/master/epg.xml"
+}
+
 
 def parse_args():
     """
@@ -53,7 +69,7 @@ def parse_args():
 
     # Provider group
     prov_group = parser.add_argument_group("Provider selection")
-    prov_group.add_argument("--provider", choices=["all", "plutotv", "stvp"], default="all", help="Select which service(s) to generate")
+    prov_group.add_argument("--provider", choices=["all", "plutotv", "rakutentv", "stvp"], default="all", help="Select which service(s) to generate")
 
     # PlutoTV group
     plutotv_group = parser.add_argument_group("Pluto TV")
@@ -62,9 +78,16 @@ def parse_args():
     plutotv_group.add_argument("--plutotv-source", default="https://api.pluto.tv/v2/channels", help="Pluto TV JSON API URL")
     plutotv_group.add_argument("--plutotv-id-type", choices=["id", "slug"], default="id", help="Mapping type for EPG: 'id' (UUID) or 'slug' (human readable)")
 
+    # Rakuten TV group
+    rakuten_group = parser.add_argument_group("Rakuten TV")
+    rakuten_group.add_argument("--rakutentv-region", choices=list(RAKUTEN_CLASSIFICATIONS.keys()), default="de", help="Regional subset for Rakuten TV. Note: Rakuten TV is strictly geo-blocked; your IP must match the selected region.")
+    rakuten_group.add_argument("--rakutentv-provider-name", default="RakutenTV", help="Display name and file prefix for Rakuten TV")
+    rakuten_group.add_argument("--rakutentv-tid", help="Manual hex transponder ID (auto-generated from provider name if omitted)")
+    rakuten_group.add_argument("--rakutentv-source", default="https://gizmo.rakuten.tv/v3", help="Rakuten TV API base URL")
+
     # Samsung TV Plus group
     stvp_group = parser.add_argument_group("Samsung TV Plus")
-    stvp_group.add_argument("--stvp-region", choices=STVP_REGIONS, default="all", help="Regional subset for Samsung TV Plus")
+    stvp_group.add_argument("--stvp-region", choices=STVP_REGIONS, default="de", help="Regional subset for Samsung TV Plus")
     stvp_group.add_argument("--stvp-provider-name", default="SamsungTVPlus", help="Display name and file prefix for Samsung TV Plus")
     stvp_group.add_argument("--stvp-tid", help="Manual hex transponder ID (auto-generated from provider name if omitted)")
     stvp_group.add_argument("--stvp-source", default="https://i.mjh.nz/SamsungTVPlus/.channels.json", help="Samsung TV Plus JSON API URL")
@@ -81,8 +104,8 @@ def parse_args():
     picon_group = parser.add_argument_group("Picon settings")
     picon_group.add_argument("-d", "--download-picons", action="store_true", help="Download missing picons")
     picon_group.add_argument("-D", "--download-overwrite-picons", action="store_true", help="Download and overwrite existing picons")
-    picon_group.add_argument("-c", "--picon-color", choices=["color", "solid"], default="color", help="Choose between color or solid white logos (if available)")
-    picon_group.add_argument("--picon-post-processing", choices=["all", "false", "plutotv", "stvp"], default="stvp", help="Apply slightly rounded corners to picons from the selected provider")
+    picon_group.add_argument("--picon-colorful", default="plutotv", help="Use colorful picons ('all', 'false', 'plutotv', 'rakutentv' or a comma-separated list like 'plutotv,rakutentv')")
+    picon_group.add_argument("--picon-post-processing", default="stvp", help="Enable picon post-processing ('all', 'false', 'plutotv', 'rakutentv', 'stvp' or a comma-separated list like 'rakutentv,stvp')")
     picon_group.add_argument("-f", "--picon-folder", help="Custom path to the picon directory (overrides default search order)")
 
     # Technical group
@@ -90,11 +113,12 @@ def parse_args():
     tec_group.add_argument("-n", "--not-reload", action="store_true", help="Do not reload the Enigma2 service list after creating the bouquet")
     tec_group.add_argument("-s", "--service-type", default="4097", help="Enigma2 service type: 4097 (GstPlayer). 5001, 5002 and 5003 are used by the ServiceApp plugin and additional players such as ffmpeg + exteplayer3")
 
-	# Advanced group
+    # Advanced group
     # config_group = parser.add_argument_group("Advanced configuration")
 
     # Global switches
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress info messages, only log errors")
+    parser.add_argument("--no-parallel", dest="parallel", action="store_false", default=True, help="Disable parallel processing")
 
     return parser.parse_args()
 
@@ -132,7 +156,7 @@ def get_system_paths(custom_picon_folder=None):
     pwd = os.getcwd()
     def check_path(path, fallback):
         return path if os.access(path, os.W_OK) else fallback
-    
+
     # Determine the best picon path
     picon_path = None
     if custom_picon_folder and os.access(custom_picon_folder, os.W_OK):
@@ -151,7 +175,7 @@ def get_system_paths(custom_picon_folder=None):
             if os.path.isdir(path) and os.access(path, os.W_OK):
                 picon_path = path
                 break
-        
+
         # Fallback to local directory if no valid path was found
         if not picon_path:
             picon_path = os.path.join(pwd, 'picon')
@@ -244,12 +268,12 @@ def fetch_plutotv_data(api_url, id_type, picon_color):
         color_path = item.get("colorLogoPNG", {}).get("path", "")
         if "missing.png" in color_path:
             color_path = ""
-        
+
         solid_path = item.get("solidLogoPNG", {}).get("path", "")
         if "missing.png" in solid_path:
             solid_path = ""
         
-        # Global fallback URL from Wikimedia
+        # Fallback Picon URL from Wikimedia
         wikimedia_fallback = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Pluto_TV_logo_2024.svg/220px-Pluto_TV_logo_2024.svg.png'
 
         # Fallback logic: Choice -> Alternative -> Wikimedia
@@ -268,7 +292,141 @@ def fetch_plutotv_data(api_url, id_type, picon_color):
         })
     return channels
 
-def fetch_stvp_data(api_url, region, ignore_blacklist=False):
+def fetch_rakutentv_data(args, region, picon_color):
+    """
+    Fetch and parse channel data from Rakuten TV API including POST for streams.
+
+    Note: Rakuten TV uses strict geo-blocking based on the client's IP address.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Global arguments containing the rakutentv_source URL.
+    region : str
+        The region code (e.g., 'de') to fetch data for.
+    picon_color : str
+        The style of logo to fetch ('color' or 'solid').
+
+    Returns
+    -------
+    list of dict
+        A list containing dictionaries with channel metadata and stream URLs.
+    """
+    cls_id = RAKUTEN_CLASSIFICATIONS.get(region, 307)
+    api_base = args.rakutentv_source
+    headers = {
+        "Origin": "https://rakuten.tv",
+        "Referer": "https://rakuten.tv/",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:98.0) Gecko/20100101 Firefox/98.0",
+        "Content-Type": "application/json"
+    }
+
+    import urllib.parse
+    def _get(path, query_params):
+        qs = urllib.parse.urlencode(query_params)
+        req = urllib.request.Request(f"{api_base}{path}?{qs}", headers=headers)
+        try:
+            with urllib.request.urlopen(req) as res:
+                return json.loads(res.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            if e.code in [403, 401]:
+                logging.error(f"Rakuten TV access denied (HTTP {e.code}). This is likely due to Geo-blocking. Your IP must match the '{region}' region.")
+            else:
+                logging.error(f"Rakuten GET Error: {e}")
+            return {}
+        except Exception as e:
+            logging.error(f"Rakuten GET Error: {e}")
+            return {}
+
+    def _post(path, query_params, payload):
+        qs = urllib.parse.urlencode(query_params)
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(f"{api_base}{path}?{qs}", data=data, headers=headers, method='POST')
+        try:
+            with urllib.request.urlopen(req) as res:
+                return json.loads(res.read().decode('utf-8'))
+        except Exception:
+            return {}
+
+    query_base = {
+        "classification_id": cls_id, "device_identifier": "web", 
+        "locale": region, "market_code": region
+    }
+
+    cat_data = _get("/live_channel_categories", query_base)
+    cc_map = {}
+    for cat in cat_data.get("data", []):
+        cat_name = cat.get("name", "Uncategorized")
+        for ch_id_string in cat.get("live_channels", []):
+            cc_map[ch_id_string] = cat_name
+
+    ch_query = query_base.copy()
+    ch_query.update({"page": 1, "per_page": 200})
+    ch_data = _get("/live_channels", ch_query)
+
+    processed_channels = []
+    skipped_count = [0] 
+    ch_list = ch_data.get("data", [])
+
+    if not ch_list:
+        return processed_channels
+        
+    logging.info("Rakuten TV: Found %d channels for region '%s'. Fetching stream URLs...", len(ch_list), region)
+
+    def process_single_rakuten_channel(ch):
+        ch_id = ch.get("id")
+        langs = ch.get("labels", {}).get("languages", [])
+        audio_lang = langs[0].get("id") if langs else "ENG"
+
+        images = ch.get("images", {})
+        logo_base = (images.get("artwork_negative", "") or images.get("artwork", "")) if picon_color == "solid" else (images.get("artwork", "") or images.get("artwork_negative", ""))
+        logo_url = ""
+        if logo_base:
+            base_url, ext = os.path.splitext(logo_base)
+            logo_url = f"{base_url}-width220{ext}"
+
+        post_query = query_base.copy()
+        post_query.update({"device_stream_audio_quality": "2.0", "device_stream_hdr_type": "NONE", "device_stream_video_quality": "FHD", "disable_dash_legacy_packages": False})
+        post_payload = {"audio_language": audio_lang, "audio_quality": "2.0", "classification_id": cls_id, "content_id": ch_id, "content_type": "live_channels", "device_serial": "not implemented", "player": "web:HLS-NONE:NONE", "strict_video_quality": False, "subtitle_language": "MIS", "video_type": "stream"}
+
+        stream_res = _post("/avod/streamings", post_query, post_payload)
+        s_infos = stream_res.get("data", {}).get("stream_infos", [])
+        stream_url = s_infos[0].get("url", "") if s_infos else ""
+
+        if not stream_url:
+            skipped_count[0] += 1
+            return None
+
+        if '.m3u8' in stream_url:
+            stream_url = stream_url.partition('.m3u8')[0] + '.m3u8'
+
+        return {
+            "sid": ch.get("channel_number", 0),
+            "name": ch.get("title", "Unknown").strip(),
+            "category": cc_map.get(ch_id, "Uncategorized").strip(),
+            "channel_id": ch_id,
+            "logo_url": logo_url,
+            "url": stream_url
+        }
+
+    if args.parallel:
+        logging.info("Rakuten TV: Fetching stream URLs in parallel (max 10 workers)...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(process_single_rakuten_channel, ch_list))
+            processed_channels = [r for r in results if r is not None]
+    else:
+        logging.info("Rakuten TV: Fetching stream URLs sequentially...")
+        for ch in ch_list:
+            res = process_single_rakuten_channel(ch)
+            if res:
+                processed_channels.append(res)
+
+    if skipped_count[0] > 0:
+        logging.info("Rakuten TV: %d channels skipped (Geo-blocked/No stream).", skipped_count[0])
+
+    return processed_channels
+
+def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
     """
     Fetch and parse channel data from the Samsung TV Plus JSON API.
 
@@ -278,8 +436,10 @@ def fetch_stvp_data(api_url, region, ignore_blacklist=False):
         The URL to the Samsung TV Plus JSON API.
     region : str
         The region code to filter channels.
+    picon_color : str
+        Style of logo (currently placeholder for STVP consistency).
     ignore_blacklist : bool, optional
-        If True, the internal STVP_BLACKLIST will be ignored. Default is False.
+        If True, the internal STVP_BLACKLIST will be ignored.
 
     Returns
     -------
@@ -317,29 +477,33 @@ def fetch_stvp_data(api_url, region, ignore_blacklist=False):
             })
     return channels
 
-def create_m3u_playlist(channels, output_path):
+def create_m3u_playlist(channels, output_file):
     """
-    Generate an M3U playlist file from channel data.
-
+    Generate a standalone M3U8 playlist from collected channel data.
+    
     Parameters
     ----------
     channels : list of dict
-        List of channel metadata dictionaries.
-    output_path : str
-        File path where the M3U file will be saved.
+        A list of all processed channels from all active providers.
+    output_file : str
+        The destination path where the .m3u file will be saved.
     """
-    if not output_path:
+    if not channels:
+        logging.error("!!! No channels collected. M3U playlist will NOT be created.")
+        logging.error("Check if your IP address matches the provider's region (Geo-blocking).")
         return
+
     try:
-        with open(output_path, 'w', encoding='utf-8') as f:
+        with open(output_file, 'w', encoding='utf-8') as f:
             f.write("#EXTM3U\n")
             for c in channels:
-                f.write(f'#EXTINF:-1 tvg-id="{c["channel_id"]}" tvg-chno="{c["sid"]}" '
-                        f'tvg-name="{c["name"]}" tvg-logo="{c["logo_url"]}" '
-                        f'group-title="{c["category"]}",{c["name"]}\n{c["url"]}\n')
-        logging.info(f"M3U created: {output_path}")
+                logo = c.get('logo_url', '')
+                group = c.get('category', 'Uncategorized')
+                f.write(f'#EXTINF:-1 tvg-id="{c["channel_id"]}" tvg-logo="{logo}" group-title="{group}",{c["name"]}\n')
+                f.write(f'{c["url"]}\n')
+        logging.info(f"M3U created: {output_file} ({len(channels)} entries)")
     except Exception as e:
-        logging.error(f"M3U Error: {e}")
+        logging.error(f"Failed to create M3U playlist: {e}")
 
 def write_bouquets(bouquet_data, bouquet_dir, reverse=False):
     """
@@ -406,7 +570,7 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
 
     # Extract clean provider name for bouquet display
     provider_display = provider_prefix.split('_')[-1]
-    
+
     # Force uppercase TID to adhere to Enigma2 standards
     tid = tid.upper()
 
@@ -422,7 +586,7 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
         url_clean = c['url'].replace(':', '%3a')
 
         picon_name = f"{service_type}_0_1_{hex_sid_picon}_{tid}_0_0_0_0_0".upper()
-        
+
         if download_picons and c['logo_url']:
             picon_url = f"{c['logo_url']}?w=220&h=132"
             picon_list.append((picon_url, f"{picon_name}.png"))
@@ -464,36 +628,61 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
     logging.info(f"EPG channels file created: {channels_file} ({len(xml_entries)} entries).")
     return picon_list
 
-def download_picons(picon_list, picon_folder, overwrite, post_process=False):
+def download_picons(args, picons, picon_folder, overwrite, post_process_active):
     """
-    Download channel logos as picons and optionally apply image processing.
-
-    Parameters
-    ----------
-    picon_list : list of tuple
-        List containing (source_url, target_filename) tuples.
-    picon_folder : str
-        Local directory path for saving picons.
-    overwrite : bool
-        Whether to overwrite existing files.
-    post_process : bool, optional
-        Whether to apply rounded corners to the downloaded images. Default is False.
+    Downloads picons with optional parallel processing and post-processing.
+    
+    Uses a ThreadPoolExecutor to handle multiple network requests simultaneously
+    if parallel processing is enabled.
     """
-    if not picon_list:
+    if not picons:
         return
+
     os.makedirs(picon_folder, exist_ok=True)
-    logging.info(f"Downloading {len(picon_list)} picons...")
-    for url, name in picon_list:
-        path = os.path.join(picon_folder, name)
-        if not os.path.exists(path) or overwrite:
-            try:
-                with urllib.request.urlopen(url) as r, open(path, 'wb') as f:
-                    f.write(r.read())
-                # Apply rounded corners if requested
-                if post_process:
-                    apply_rounded_corners(path)
-            except Exception:
-                pass
+
+    def fetch_and_save(p_url, p_path):
+        """Worker function to download and optionally process a single picon."""
+        if not overwrite and os.path.exists(p_path):
+            return False
+        try:
+            req = urllib.request.Request(p_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                with open(p_path, 'wb') as f:
+                    f.write(response.read())
+
+            if post_process_active:
+                apply_rounded_corners(p_path)
+            return True
+        except Exception:
+            return False
+
+    is_parallel = getattr(args, 'parallel', False)
+
+    download_tasks = []
+    for url, filename in picons:
+        if url.startswith('http'):
+            full_path = os.path.join(picon_folder, filename)
+            download_tasks.append((url, full_path))
+
+    if not download_tasks:
+        return
+
+    count = 0
+    if is_parallel:
+        logging.info("Downloading %d picons in parallel...", len(download_tasks))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            future_to_url = {executor.submit(fetch_and_save, url, path): url for url, path in download_tasks}
+            for future in concurrent.futures.as_completed(future_to_url):
+                if future.result():
+                    count += 1
+    else:
+        logging.info("Downloading %d picons sequentially...", len(download_tasks))
+        for url, path in download_tasks:
+            if fetch_and_save(url, path):
+                count += 1
+
+    if count > 0:
+        logging.info("Downloaded and processed %d new picons.", count)
 
 def apply_rounded_corners(image_path):
     """
@@ -509,12 +698,12 @@ def apply_rounded_corners(image_path):
             # Calculate radius: ~10% of the smaller dimension for Material feel
             width, height = img.size
             radius = int(min(width, height) * 0.1)
-            
+
             # Create a mask for rounded corners
             mask = Image.new('L', img.size, 0)
             draw = ImageDraw.Draw(mask)
             draw.rounded_rectangle((0, 0, width, height), radius=radius, fill=255)
-            
+
             # Apply mask
             result = Image.new('RGBA', img.size, (0, 0, 0, 0))
             result.paste(img, (0, 0), mask=mask)
@@ -558,6 +747,26 @@ def create_epg_source(conf_dir, epg_source_file, channels_file, provider_name, s
     except Exception as e:
         logging.error(f"EPG Source Error: {e}")
 
+def create_rakuten_epg_source(conf_dir, epg_source_file, channels_file, provider_name, region):
+    """Create an XMLTV source file specifically for Rakuten TV GitHub EPGs."""
+    epg_url = RAKUTEN_EPG_URLS.get(region)
+    if not epg_url:
+        logging.info(f"Rakuten TV EPG: No EPG URL available for region '{region}'. EPG creation skipped.")
+        return
+
+    path = os.path.join(conf_dir, epg_source_file)
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('<?xml version="1.0" encoding="utf-8"?>\n<sources>\n')
+            f.write(f'\t<sourcecat sourcecatname="{provider_name}">\n')
+            f.write(f'\t\t<source type="gen_xmltv" nocheck="1" channels="{channels_file}">\n'
+                    f'\t\t\t<description>{provider_name} ({region.upper()})</description>\n'
+                    f'\t\t\t<url>{epg_url}</url>\n\t\t</source>\n')
+            f.write('\t</sourcecat>\n</sources>\n')
+        logging.info(f"EPG source file created: {epg_source_file}")
+    except Exception as e:
+        logging.error(f"EPG Source Error: {e}")
+
 def reload_enigma2():
     """
     Trigger a service list reload via the Enigma2 WebInterface.
@@ -577,7 +786,7 @@ def main():
         logging.getLogger().setLevel(logging.ERROR)
 
     conf_dir, bouquet_dir, picon_folder = get_system_paths(args.picon_folder)
-    
+
     # Collective list for all channels
     all_channels_for_m3u = []
 
@@ -587,18 +796,24 @@ def main():
         services.append({
             'id': 'plutotv',
             'name': args.plutotv_provider_name,
-            'fetch_func': lambda: fetch_plutotv_data(args.plutotv_source, args.plutotv_id_type, args.picon_color),
-            'epg_key': 'PlutoTV',
-            'langs': PLUTOTV_EPG_LANGS
+            'fetch_func': lambda mode: fetch_plutotv_data(args.plutotv_source, args.plutotv_id_type, mode),
+            'epg_func': lambda c_file, s_file, srv_name: create_epg_source(conf_dir, s_file, c_file, srv_name, 'PlutoTV', PLUTOTV_EPG_LANGS)
+        })
+
+    if args.provider in ["all", "rakutentv"]:
+        services.append({
+            'id': 'rakutentv',
+            'name': args.rakutentv_provider_name,
+            'fetch_func': lambda mode: fetch_rakutentv_data(args, args.rakutentv_region, mode),
+            'epg_func': lambda c_file, s_file, srv_name: create_rakuten_epg_source(conf_dir, s_file, c_file, srv_name, args.rakutentv_region)
         })
 
     if args.provider in ["all", "stvp"]:
         services.append({
             'id': 'stvp',
             'name': args.stvp_provider_name,
-            'fetch_func': lambda: fetch_stvp_data(args.stvp_source, args.stvp_region, args.stvp_ignore_blacklist),
-            'epg_key': 'SamsungTVPlus',
-            'langs': STVP_REGIONS
+            'fetch_func': lambda mode: fetch_stvp_data(args.stvp_source, args.stvp_region, mode, args.stvp_ignore_blacklist),
+            'epg_func': lambda c_file, s_file, srv_name: create_epg_source(conf_dir, s_file, c_file, srv_name, 'SamsungTVPlus', STVP_REGIONS)
         })
 
     for srv in services:
@@ -612,11 +827,25 @@ def main():
 
         c_file, s_file = f"{srv['name']}.channels.xml", f"{srv['name']}.sources.xml"
 
-        logging.info(f"Processing provider: {srv['name']} (TID: {tid})")
-        channels = srv['fetch_func']()
+        # --- Picon Color Logic ---
+        # Parse the comma-separated list to decide if this provider gets colorful picons.
+        colorful_setting = args.picon_colorful.lower()
+        colorful_list = [x.strip() for x in colorful_setting.split(',')]
+        is_colorful = "all" in colorful_list or srv['id'] in colorful_list
+        picon_mode = "color" if is_colorful else "solid"
+
+        logging.info(f"Processing provider: {srv['name']} (TID: {tid}) [Picon Mode: {picon_mode}]")
+
+        # Execute the fetch function with the determined picon mode
+        channels = srv['fetch_func'](picon_mode)
 
         if not channels:
-            logging.warning(f"No channels found for {srv['name']}.")
+            if srv['id'] == 'rakutentv':
+                logging.error(f"!!! {srv['name']}: No streamable channels found.")
+                logging.error(f"Your IP must be physically located in the region '{args.rakutentv_region}'.")
+                logging.error("The API found the channel names, but refused to provide the video streams.")
+            else:
+                logging.warning(f"No channels found for {srv['name']}.")
             continue
 
         # Sort by category/chno
@@ -635,13 +864,16 @@ def main():
         picons = process_channels(channels, prefix, tid, args.service_type, bouquet_dir, conf_dir, c_file, 
                                   do_download, args.one_bouquet, args.reverse_bouquets)
 
-        # Determine if post-processing should be applied for this service
-        post_process_active = args.picon_post_processing in ["all", srv['id']]
+        # --- Picon Post-Processing Logic ---
+        # Determine if rounded corners should be applied for this specific provider.
+        pp_setting = args.picon_post_processing.lower()
+        pp_list = [x.strip() for x in pp_setting.split(',')]
+        post_process_active = "all" in pp_list or srv['id'] in pp_list
 
         if do_download:
-            download_picons(picons, picon_folder, args.download_overwrite_picons, post_process_active)
+            download_picons(args, picons, picon_folder, args.download_overwrite_picons, post_process_active)
 
-        create_epg_source(conf_dir, s_file, c_file, srv['name'], srv['epg_key'], srv['langs'])
+        srv['epg_func'](c_file, s_file, srv['name'])
 
     if args.playlist_only:
         create_m3u_playlist(all_channels_for_m3u, args.playlist_only)

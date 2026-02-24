@@ -8,7 +8,7 @@
 # All variables are optional. Comment out to use internal script defaults.
 
 ## Provider selection ##
-# Select which service(s) to generate (all,plutotv,stvp) [default: all]
+# Select which service(s) to generate (all,plutotv,rakuten,stvp) [default: all]
 # PROVIDER='plutotv'
 
 ## Pluto TV ##
@@ -24,9 +24,19 @@
 # Mapping type for EPG: 'id' (UUID) or 'slug' (human readable) [default: id]
 # PLUTOTV_ID_TYPE='slug'
 
+## Rakuten TV ##
+# Regional subset for Rakuten TV. Note: Rakuten TV is strictly geo-blocked; your IP must match the selected region. (al,at,ba,be,bg,ch,cz,de,dk,ee,es,fi,fr,gr,hr,ie,is,it,jp,lt,lu,me,mk,nl,no,pl,pt,ro,rs,se,sk,uk) [default: de]
+# RAKUTENTV_REGION='uk'
+
+# Display name and file prefix for Rakuten TV [default: RakutenTV]
+# RAKUTENTV_PROVIDER_NAME='RakutenTV-de'
+
+# Manual hex transponder ID (auto-generated from provider name if omitted) [default: None]
+# RAKUTENTV_TID='024A'
+
 ## Samsung TV Plus ##
-# Regional subset for Samsung TV Plus (all,at,ca,ch,de,es,fr,gb,in,it,kr,us) [default: all]
-# STVP_REGION='de'
+# Regional subset for Samsung TV Plus (all,at,ca,ch,de,es,fr,gb,in,it,kr,us) [default: de]
+# STVP_REGION='all'
 
 # Display name and file prefix for Samsung TV Plus [default: SamsungTVPlus]
 # STVP_PROVIDER_NAME='SamsungTVPlus-de'
@@ -39,15 +49,15 @@
 
 # Include all channels, ignoring the internal STVP blacklist [default: False]
 # STVP_IGNORE_BLACKLIST='true'
-                        
+
 ## Picon ##
 # Download missing picons (true/false/overwrite) [default: false]
 # DOWNLOAD_PICONS='overwrite'
 
-# Color variant for Picons: 'color' or 'solid' [default: color]
-# PICON_COLOR='solid'
+# Use colorful picons for provider (all, false, plutotv, rakutentv or a comma-separated list like 'plutotv,rakutentv') [default: plutotv]
+# PICON_COLORFUL='solid'
 
-# Apply slightly rounded corners to picons from the selected provider (all,false,plutotv,stvp) [default: stvp]
+# Enable picon post-processing (all, false, plutotv, rakutentv, stvp or a comma-separated list like 'plutotv,stvp') [default: rakutentv,stvp]
 # PICON_POST_PROCESSING='all'
 
 # Custom path to the picon directory (overrides default Enigma2 search order) [default: auto]
@@ -65,6 +75,9 @@
 
 # Do not reload the Enigma2 service list after creating the bouquet [default: false]
 # NOT_RELOAD='true'
+
+# Disable parallel processing [default: false]
+# NO_PARALLEL='true'
 
 # Suppress info messages, only log errors [default: false]
 # QUIET='true'
@@ -99,24 +112,29 @@ fi
 set -- "$PYTHON_BIN" "$SCRIPT_PATH"
 
 # String arguments
-[ -n "$PROVIDER" ]              && set -- "$@" --provider "$PROVIDER"
-[ -n "$PLUTOTV_PROVIDER_NAME" ] && set -- "$@" --plutotv-provider-name "$PLUTOTV_PROVIDER_NAME"
-[ -n "$PLUTOTV_TID" ]           && set -- "$@" --plutotv-tid "$PLUTOTV_TID"
-[ -n "$PLUTOTV_SOURCE" ]        && set -- "$@" --plutotv-source "$PLUTOTV_SOURCE"
-[ -n "$PLUTOTV_ID_TYPE" ]       && set -- "$@" --plutotv-id-type "$PLUTOTV_ID_TYPE"
-[ -n "$STVP_REGION" ]           && set -- "$@" --stvp-region "$STVP_REGION"
-[ -n "$STVP_PROVIDER_NAME" ]    && set -- "$@" --stvp-provider-name "$STVP_PROVIDER_NAME"
-[ -n "$STVP_TID" ]              && set -- "$@" --stvp-tid "$STVP_TID"
-[ -n "$STVP_SOURCE" ]           && set -- "$@" --stvp-source "$STVP_SOURCE"
-[ -n "$PICON_COLOR" ]           && set -- "$@" --picon-color "$PICON_COLOR"
-[ -n "$PICON_POST_PROCESSING" ] && set -- "$@" --picon-post-processing "$PICON_POST_PROCESSING"
-[ -n "$PICON_FOLDER" ]          && set -- "$@" --picon-folder "$PICON_FOLDER"
-[ -n "$SERVICE_TYPE" ]          && set -- "$@" --service-type "$SERVICE_TYPE"
+[ -n "$PROVIDER" ]              	&& set -- "$@" --provider "$PROVIDER"
+[ -n "$PLUTOTV_PROVIDER_NAME" ] 	&& set -- "$@" --plutotv-provider-name "$PLUTOTV_PROVIDER_NAME"
+[ -n "$PLUTOTV_TID" ]           	&& set -- "$@" --plutotv-tid "$PLUTOTV_TID"
+[ -n "$PLUTOTV_SOURCE" ]        	&& set -- "$@" --plutotv-source "$PLUTOTV_SOURCE"
+[ -n "$PLUTOTV_ID_TYPE" ]      		&& set -- "$@" --plutotv-id-type "$PLUTOTV_ID_TYPE"
+[ -n "$RAKUTENTV_REGION" ]        	&& set -- "$@" --rakutentv-region "$RAKUTENTV_REGION"
+[ -n "$RAKUTENTV_PROVIDER_NAME" ] 	&& set -- "$@" --rakutentv-provider-name "$RAKUTENTV_PROVIDER_NAME"
+[ -n "$RAKUTENTV_TID" ]           	&& set -- "$@" --rakutentv-tid  "$RAKUTENTV_TID"
+[ -n "$RAKUTENTV_SOURCE" ]			&& set -- "$@" --rakutentv-source "$RAKUTENTV_SOURCE"
+[ -n "$STVP_REGION" ]           	&& set -- "$@" --stvp-region "$STVP_REGION"
+[ -n "$STVP_PROVIDER_NAME" ]    	&& set -- "$@" --stvp-provider-name "$STVP_PROVIDER_NAME"
+[ -n "$STVP_TID" ]              	&& set -- "$@" --stvp-tid "$STVP_TID"
+[ -n "$STVP_SOURCE" ]           	&& set -- "$@" --stvp-source "$STVP_SOURCE"
+[ -n "$PICON_COLORFUL" ]           	&& set -- "$@" --picon-colorful "$PICON_COLORFUL"
+[ -n "$PICON_POST_PROCESSING" ] 	&& set -- "$@" --picon-post-processing "$PICON_POST_PROCESSING"
+[ -n "$PICON_FOLDER" ]          	&& set -- "$@" --picon-folder "$PICON_FOLDER"
+[ -n "$SERVICE_TYPE" ]          	&& set -- "$@" --service-type "$SERVICE_TYPE"
 
 # Boolean Flags (Translate 'true' variables to python flags)
 [ "$REVERSE_BOUQUETS" = "true" ]        && set -- "$@" --reverse-bouquets
 [ "$ONE_BOUQUET" = "true" ]             && set -- "$@" --one-bouquet
 [ "$NOT_RELOAD" = "true" ]              && set -- "$@" --not-reload
+[ "$NO_PARALLEL" = "true" ]             && set -- "$@" --no-parallel
 [ "$QUIET" = "true" ]                   && set -- "$@" --quiet
 [ "$STVP_IGNORE_BLACKLIST" = "true" ]   && set -- "$@" --stvp-ignore-blacklist
 
