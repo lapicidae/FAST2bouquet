@@ -82,7 +82,7 @@ def parse_args():
 
     # Provider group
     prov_group = parser.add_argument_group("Provider selection")
-    prov_group.add_argument("--provider", default="all", help="Select which service(s) to generate ('all', 'plutotv', 'rakutentv', 'stvp' or a comma-separated list like 'plutotv,stvp')")
+    prov_group.add_argument("--provider", default="all", help="Select which service(s) to generate. The order of the list determines the sorting in Enigma2 ('all', 'plutotv', 'rakutentv', 'stvp' or a comma-separated list like 'plutotv,stvp')")
 
     # PlutoTV group
     plutotv_group = parser.add_argument_group("Pluto TV")
@@ -534,16 +534,19 @@ def write_bouquets(bouquet_data, bouquet_dir, reverse=False):
         Whether to sort the bouquet references in reverse alphabetical order.
     """
     bouquets_tv = os.path.join(bouquet_dir, "bouquets.tv")
+
+    # Sort filenames to ensure consistent order in bouquets.tv
+    filenames = sorted(bouquet_data.keys(), reverse=reverse)
     references = []
 
-    for filename, lines in bouquet_data.items():
+    for filename in filenames:
+        lines = bouquet_data[filename]
         path = os.path.join(bouquet_dir, filename)
         with open(path, 'w', encoding='utf-8') as f:
             f.writelines(lines)
         references.append(f'#SERVICE 1:7:1:0:0:0:0:0:0:0:FROM BOUQUET "{filename}" ORDER BY bouquet\n')
 
     if references:
-        references.sort(reverse=reverse)
         with open(bouquets_tv, 'a', encoding='utf-8') as f:
             f.writelines(references)
         logging.info(f"Updated bouquets.tv and created {len(references)} bouquet files.")
@@ -941,6 +944,13 @@ def main():
             'fetch_func': lambda mode: fetch_stvp_data(args.stvp_source, args.stvp_region, mode, args.stvp_ignore_blacklist),
             'epg_func': lambda c_file, s_file, srv_name: create_epg_source(conf_dir, s_file, c_file, srv_name, 'SamsungTVPlus', STVP_REGIONS)
         })
+
+	# Sort services based on the order in --provider or apply reverse if requested
+    if args.reverse_bouquets:
+        services.reverse()
+    elif provider_setting != "all":
+        # Ensure the order matches the comma-separated list in --provider
+        services.sort(key=lambda s: selected_providers.index(s['id']) if s['id'] in selected_providers else 99)
 
     for srv in services:
         # Configuration for current provider

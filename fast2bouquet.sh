@@ -13,9 +13,10 @@
 #  PROVIDER SELECTION
 # ------------------------------------------------------------------------------
 # Select which service(s) to generate.
+# The order of the list determines the sorting.
 # Options: all, plutotv, rakutentv, stvp (or comma-separated list)
 # Default: all
-# PROVIDER='plutotv'
+# PROVIDER='stvp,plutotv'
 
 # ------------------------------------------------------------------------------
 #  PLUTO TV
