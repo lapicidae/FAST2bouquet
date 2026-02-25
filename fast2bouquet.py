@@ -23,6 +23,9 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 # Supported Providers
 SUPPORTED_PROVIDERS = ['plutotv', 'rakutentv', 'stvp']
 
+# Playlist Configuration
+DEFAULT_M3U_NAME = "iptv_FAST.m3u"
+
 # Pluto TV Specifics
 PLUTOTV_EPG_LANGS = ['all', 'ar', 'br', 'ca', 'cl', 'de', 'dk', 'es', 'fr', 'gb', 'it', 'mx', 'no', 'se', 'us']
 
@@ -109,12 +112,16 @@ def parse_args():
     stvp_group.add_argument("--stvp-source", default="https://i.mjh.nz/SamsungTVPlus/.channels.json", help="Samsung TV Plus JSON API URL")
     stvp_group.add_argument("--stvp-ignore-blacklist", action="store_true", help="Include all channels, ignoring the internal STVP blacklist")
 
+    # Bouquet selection group
+    bouquet_group = parser.add_argument_group("Bouquet options")
+    bouquet_group.add_argument("-o", "--one-bouquet", action="store_true", help="Merge all categories with markers into a single bouquet per provider")
+    bouquet_group.add_argument("-r", "--reverse-bouquets", action="store_true", help="Sort bouquets in reverse alphabetical order (Z-A)")
+
     # Output selection group
-    output_group = parser.add_argument_group("Output options")
-    output_group.add_argument("-p", "--playlist", help="Create an M3U playlist file and save it in the specified path")
-    output_group.add_argument("-P", "--playlist-only", help="Create ONLY an M3U playlist file and save it in the specified path")
-    output_group.add_argument("-o", "--one-bouquet", action="store_true", help="Merge all categories with markers into a single bouquet per provider")
-    output_group.add_argument("-r", "--reverse-bouquets", action="store_true", help="Sort bouquets in reverse alphabetical order (Z-A)")
+    playlist_group = parser.add_argument_group("Playlist options")
+    playlist_group.add_argument("-p", "--playlist", nargs='?', const='.', help="Create M3U playlist(s). Default path: /etc/enigma2 or current directory.")
+    playlist_group.add_argument("-P", "--playlist-only", nargs='?', const='.', help="Create ONLY M3U playlist(s). Stops execution after playlist creation.")
+    playlist_group.add_argument("-O", "--one-playlist", action="store_true", help=f"Merge all providers into a single '{DEFAULT_M3U_NAME}'.")
 
     # Picon group
     picon_group = parser.add_argument_group("Picon settings")
@@ -128,15 +135,15 @@ def parse_args():
 
     # Technical group
     tec_group = parser.add_argument_group("Technical configuration")
-    tec_group.add_argument("-n", "--not-reload", action="store_true", help="Do not reload the Enigma2 service list after creating the bouquet")
-    tec_group.add_argument("-s", "--service-type", default="4097", help="Enigma2 service type: 4097 (GstPlayer). 5001, 5002 and 5003 are used by the ServiceApp plugin and additional players such as ffmpeg + exteplayer3")
+    tec_group.add_argument("--no-parallel", dest="parallel", action="store_false", default=True, help="Disable parallel processing")
+    tec_group.add_argument("--not-reload", action="store_true", help="Do not reload the Enigma2 service list after creating the bouquet")
+    tec_group.add_argument("--service-type", default="4097", help="Enigma2 service type: 4097 (GstPlayer). 5001, 5002 and 5003 are used by the ServiceApp plugin and additional players such as ffmpeg + exteplayer3")
 
     # Advanced group
     # config_group = parser.add_argument_group("Advanced configuration")
 
     # Global switches
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress info messages, only log errors")
-    parser.add_argument("--no-parallel", dest="parallel", action="store_false", default=True, help="Disable parallel processing")
 
     return parser.parse_args()
 
@@ -458,7 +465,7 @@ def fetch_rakutentv_data(args, region, picon_color):
                 processed_channels.append(res)
 
     if skipped_count[0] > 0:
-        logging.info("Rakuten TV: %d channels skipped (Geo-blocked/No stream).", skipped_count[0])
+        logging.info("Rakuten TV: %d channels skipped (Geo-blocked/No stream/IP blocked).", skipped_count[0])
 
     return processed_channels
 
@@ -516,20 +523,19 @@ def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
 
 def create_m3u_playlist(channels, output_file):
     """
-    Generate a standalone M3U8 playlist from collected channel data.
+    Create an M3U playlist file from a list of channels.
 
     Parameters
     ----------
     channels : list of dict
-        A list of all processed channels from all active providers.
+        The list of channel dictionaries containing name, url, logo, etc.
     output_file : str
-        The destination path where the .m3u file will be saved.
-    """
-    if not channels:
-        logging.error("!!! No channels collected. M3U playlist will NOT be created.")
-        logging.error("Check if your IP address matches the provider's region (Geo-blocking).")
-        return
+        The full path and filename where the M3U should be saved.
 
+    Returns
+    -------
+    None
+    """
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write("#EXTM3U\n")
@@ -539,9 +545,9 @@ def create_m3u_playlist(channels, output_file):
                 chno = c.get('m3u_chno', 0)
                 f.write(f'#EXTINF:-1 tvg-id="{c["channel_id"]}" tvg-chno="{chno}" tvg-logo="{logo}" group-title="{group}",{c["name"]}\n')
                 f.write(f'{c["url"]}\n')
-        logging.info(f"M3U created: {output_file} ({len(channels)} entries)")
+        logging.info(f"M3U playlist created: {output_file} ({len(channels)} entries)")
     except Exception as e:
-        logging.error(f"Failed to create M3U playlist: {e}")
+        logging.error(f"Failed to create M3U playlist {output_file}: {e}")
 
 def write_bouquets(bouquet_data, bouquet_dir, reverse=False):
     """
@@ -983,8 +989,6 @@ def main():
         # Ensure the order matches the comma-separated list in --provider
         services.sort(key=lambda s: selected_providers.index(s['id']) if s['id'] in selected_providers else 99)
 
-    global_m3u_counter = 1
-
     for srv in services:
         # Configuration for current provider
         prefix = f"userbouquet.iptv_{srv['name']}"
@@ -1027,10 +1031,9 @@ def main():
             x.get('name', '').lower()
         ))
 
-        # Sequential numbering for M3U
+        # Sequential numbering and provider tagging for M3U
         for c in channels:
-            c['m3u_chno'] = global_m3u_counter
-            global_m3u_counter += 1
+            c['provider_name'] = srv['name']
 
         all_channels_for_m3u.extend(channels)
 
@@ -1064,10 +1067,42 @@ def main():
 
         srv['epg_func'](c_file, s_file, srv['name'])
 
-    if args.playlist_only:
-        create_m3u_playlist(all_channels_for_m3u, args.playlist_only)
-    elif args.playlist:
-        create_m3u_playlist(all_channels_for_m3u, args.playlist)
+    # Playlist path determination
+    playlist_arg = args.playlist_only or args.playlist
+    
+    if playlist_arg:
+        # Get system paths: index 1 is bouquet_path (/etc/enigma2 or current dir)
+        _, playlist_folder, _ = get_system_paths(playlist_arg if os.path.isdir(playlist_arg) else None)
+
+        if args.one_playlist:
+            # Combined file mode: Use DEFAULT_M3U_NAME
+            full_path = playlist_arg if playlist_arg.endswith('.m3u') else os.path.join(playlist_folder, DEFAULT_M3U_NAME)
+
+            # Reset counter for single playlist
+            for i, c in enumerate(all_channels_for_m3u, start=1):
+                c['m3u_chno'] = i
+
+            create_m3u_playlist(all_channels_for_m3u, full_path)
+        else:
+            # Separate files mode: Group by the tagged provider name
+            from collections import OrderedDict
+            provider_groups = OrderedDict()
+            
+            for c in all_channels_for_m3u:
+                p_name = c.get('provider_name', 'Other')
+                if p_name not in provider_groups:
+                    provider_groups[p_name] = []
+                provider_groups[p_name].append(c)
+
+            for p_name, p_channels in provider_groups.items():
+                filename = f"iptv_{p_name}.m3u"
+                full_path = os.path.join(playlist_folder, filename)
+
+                # Reset counter for EACH provider playlist
+                for i, c in enumerate(p_channels, start=1):
+                    c['m3u_chno'] = i
+
+                create_m3u_playlist(p_channels, full_path)
 
     if not args.not_reload and not args.playlist_only:
         reload_enigma2()
