@@ -489,11 +489,15 @@ def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
     list of dict
         A list containing dictionaries with channel metadata and stream URLs.
     """
+    default_ua = 'okhttp/4.12.0'
     try:
-        # User-agent as requested for Samsung API
-        req = urllib.request.Request(api_url, headers={'User-Agent': 'okhttp/4.12.0'})
+        # Initial request to get the JSON data
+        req = urllib.request.Request(api_url, headers={'User-Agent': default_ua})
         with urllib.request.urlopen(req) as response:
             data = json.loads(response.read().decode('utf-8'))
+
+            # Extract dynamic User-Agent from API response
+            api_ua = data.get("headers", {}).get("user-agent", default_ua)
     except Exception as e:
         logging.error(f"Error fetching Samsung TV Plus data from {api_url}: {e}")
         return []
@@ -510,14 +514,17 @@ def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
                 logging.debug(f"Skipping blacklisted STVP channel: {cid}")
                 continue
 
+            api_ua = data.get("headers", {}).get("user-agent", default_ua) #
+
             channels.append({
                 "sid": get_stable_sid(cid),
                 "ch_number": cdata.get("chno") if cdata.get("chno") is not None else 999999,
                 "name": cdata.get("name", "Unknown").strip(),
                 "category": cdata.get("group", "Uncategorized").strip(),
-                "channel_id": cid,                      # Raw ID for EPG matching
+                "channel_id": cid,
                 "logo_url": cdata.get("logo"),
-                "url": f"https://jmp2.uk/stvp-{cid}"    # Prefix for stream URL
+                "url": f"https://jmp2.uk/stvp-{cid}",
+                "user_agent": api_ua
             })
     return channels
 
@@ -543,7 +550,13 @@ def create_m3u_playlist(channels, output_file):
                 logo = c.get('logo_url', '')
                 group = c.get('category', 'Uncategorized')
                 chno = c.get('m3u_chno', 0)
+                ua = c.get('user_agent')
+
                 f.write(f'#EXTINF:-1 tvg-id="{c["channel_id"]}" tvg-chno="{chno}" tvg-logo="{logo}" group-title="{group}",{c["name"]}\n')
+                # Add user-agent property for M3U players
+                if ua:
+                    # This tag is the standard for players such as VLC or TiviMate
+                    f.write(f'#EXTVLCOPT:http-user-agent={ua}\n') #
                 f.write(f'{c["url"]}\n')
         logging.info(f"M3U playlist created: {output_file} ({len(channels)} entries)")
     except Exception as e:
@@ -640,6 +653,10 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
         hex_sid_picon = f"{c['sid']:X}"      # e.g.: 9B
 
         url_clean = c['url'].replace(':', '%3a')
+
+        ua_val = c.get('user_agent') #
+        ua_suffix = f"#User-Agent={ua_val}" if ua_val else "" #
+        url_clean = (c['url'] + ua_suffix).replace(':', '%3a') #
 
         picon_name = f"{service_type}_0_1_{hex_sid_picon}_{tid}_0_0_0_0_0".upper()
 
