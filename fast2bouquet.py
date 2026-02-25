@@ -157,6 +157,10 @@ def normalize_name(name):
     name = re.sub(r"[^\w]+", "-", name)
     return name.strip("-")
 
+def get_stable_sid(unique_id):
+    """Generate a stable integer SID (0-65535) from a provider's unique ID."""
+    return int(hashlib.md5(str(unique_id).encode()).hexdigest()[:4], 16)
+
 def get_system_paths(custom_picon_folder=None):
     """
     Determine system paths for EPG import, Enigma2, and picons.
@@ -301,7 +305,7 @@ def fetch_plutotv_data(api_url, id_type, picon_color):
             logo_url = color_path or solid_path or wikimedia_fallback
 
         channels.append({
-            "sid": item.get("number", 0),
+            "sid": get_stable_sid(_id),
             "name": name,
             "category": category,
             "channel_id": channel_id,
@@ -419,7 +423,7 @@ def fetch_rakutentv_data(args, region, picon_color):
             stream_url = stream_url.partition('.m3u8')[0] + '.m3u8'
 
         return {
-            "sid": ch.get("channel_number", 0),
+            "sid": get_stable_sid(ch_id),
             "name": ch.get("title", "Unknown").strip(),
             "category": cc_map.get(ch_id, "Uncategorized").strip(),
             "channel_id": ch_id,
@@ -475,7 +479,7 @@ def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
 
     channels = []
     regions_to_scan = [region] if region != "all" else [r for r in data["regions"] if r != "all"]
-    
+
     for reg_key in regions_to_scan:
         reg_data = data["regions"].get(reg_key, {})
         for cid, cdata in reg_data.get("channels", {}).items():
@@ -486,7 +490,7 @@ def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
                 continue
 
             channels.append({
-                "sid": cdata.get("chno", 0),
+                "sid": get_stable_sid(cid),
                 "name": cdata.get("name", "Unknown").strip(),
                 "category": cdata.get("group", "Uncategorized").strip(),
                 "channel_id": cid,                      # Raw ID for EPG matching
@@ -498,7 +502,7 @@ def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
 def create_m3u_playlist(channels, output_file):
     """
     Generate a standalone M3U8 playlist from collected channel data.
-    
+
     Parameters
     ----------
     channels : list of dict
@@ -996,9 +1000,7 @@ def main():
             continue
 
         # Sort by category/chno
-        channels.sort(key=lambda x: (x['category'], x['sid']) if args.one_bouquet else x['sid'])
-        for i, c in enumerate(channels, start=1):
-            c['sid'] = i
+        channels.sort(key=lambda x: (x['category'], x['name'].lower()))
 
         all_channels_for_m3u.extend(channels)
 
