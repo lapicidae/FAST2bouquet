@@ -158,7 +158,19 @@ def normalize_name(name):
     return name.strip("-")
 
 def get_stable_sid(unique_id):
-    """Generate a stable integer SID (0-65535) from a provider's unique ID."""
+    """
+    Generate a stable 16-bit integer SID (0-65535) from a provider's unique ID.
+
+    Parameters
+    ----------
+    unique_id : str or int
+        The unique identifier of the channel provided by the source API.
+
+    Returns
+    -------
+    int
+        A deterministic 16-bit integer (0x0000 to 0xFFFF) for Enigma2 service references.
+    """
     return int(hashlib.md5(str(unique_id).encode()).hexdigest()[:4], 16)
 
 def get_system_paths(custom_picon_folder=None):
@@ -306,6 +318,7 @@ def fetch_plutotv_data(api_url, id_type, picon_color):
 
         channels.append({
             "sid": get_stable_sid(_id),
+            "ch_number": item.get("number") if item.get("number") is not None else 999999,
             "name": name,
             "category": category,
             "channel_id": channel_id,
@@ -392,7 +405,7 @@ def fetch_rakutentv_data(args, region, picon_color):
 
     if not ch_list:
         return processed_channels
-        
+
     logging.info("Rakuten TV: Found %d channels for region '%s'. Fetching stream URLs...", len(ch_list), region)
 
     def process_single_rakuten_channel(ch):
@@ -424,6 +437,7 @@ def fetch_rakutentv_data(args, region, picon_color):
 
         return {
             "sid": get_stable_sid(ch_id),
+            "ch_number": ch.get("channel_number") if ch.get("channel_number") is not None else 999999,
             "name": ch.get("title", "Unknown").strip(),
             "category": cc_map.get(ch_id, "Uncategorized").strip(),
             "channel_id": ch_id,
@@ -491,6 +505,7 @@ def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
 
             channels.append({
                 "sid": get_stable_sid(cid),
+                "ch_number": cdata.get("chno") if cdata.get("chno") is not None else 999999,
                 "name": cdata.get("name", "Unknown").strip(),
                 "category": cdata.get("group", "Uncategorized").strip(),
                 "channel_id": cid,                      # Raw ID for EPG matching
@@ -521,7 +536,8 @@ def create_m3u_playlist(channels, output_file):
             for c in channels:
                 logo = c.get('logo_url', '')
                 group = c.get('category', 'Uncategorized')
-                f.write(f'#EXTINF:-1 tvg-id="{c["channel_id"]}" tvg-logo="{logo}" group-title="{group}",{c["name"]}\n')
+                chno = c.get('m3u_chno', 0)
+                f.write(f'#EXTINF:-1 tvg-id="{c["channel_id"]}" tvg-chno="{chno}" tvg-logo="{logo}" group-title="{group}",{c["name"]}\n')
                 f.write(f'{c["url"]}\n')
         logging.info(f"M3U created: {output_file} ({len(channels)} entries)")
     except Exception as e:
@@ -967,6 +983,8 @@ def main():
         # Ensure the order matches the comma-separated list in --provider
         services.sort(key=lambda s: selected_providers.index(s['id']) if s['id'] in selected_providers else 99)
 
+    global_m3u_counter = 1
+
     for srv in services:
         # Configuration for current provider
         prefix = f"userbouquet.iptv_{srv['name']}"
@@ -999,8 +1017,20 @@ def main():
                 logging.warning(f"No channels found for {srv['name']}.")
             continue
 
-        # Sort by category/chno
-        channels.sort(key=lambda x: (x['category'], x['name'].lower()))
+        # Sorting: 
+        # 1. Category (alphabetical)
+        # 2. Original channel number (ascending, 999999 as end fallback)
+        # 3. Name (alphabetical, if numbers are the same)
+        channels.sort(key=lambda x: (
+            x.get('category', 'Uncategorized').lower(),
+            x.get('ch_number', 999999),
+            x.get('name', '').lower()
+        ))
+
+        # Sequential numbering for M3U
+        for c in channels:
+            c['m3u_chno'] = global_m3u_counter
+            global_m3u_counter += 1
 
         all_channels_for_m3u.extend(channels)
 
