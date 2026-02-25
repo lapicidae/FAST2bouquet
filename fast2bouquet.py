@@ -20,6 +20,9 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 # --- Internal Configuration ---
 
+# Supported Providers
+SUPPORTED_PROVIDERS = ['plutotv', 'rakutentv', 'stvp']
+
 # Pluto TV Specifics
 PLUTOTV_EPG_LANGS = ['all', 'ar', 'br', 'ca', 'cl', 'de', 'dk', 'es', 'fr', 'gb', 'it', 'mx', 'no', 'se', 'us']
 
@@ -273,7 +276,7 @@ def fetch_plutotv_data(api_url, id_type, picon_color):
         _id = item.get("_id")
         if not _id:
             continue
-            
+
         # Clean metadata and ensure fallback for channel identification
         name = item.get("name", "Unknown").strip()
         category = (item.get("category") or "Uncategorized").strip()
@@ -287,7 +290,7 @@ def fetch_plutotv_data(api_url, id_type, picon_color):
         solid_path = item.get("solidLogoPNG", {}).get("path", "")
         if "missing.png" in solid_path:
             solid_path = ""
-        
+
         # Fallback Picon URL from Wikimedia
         wikimedia_fallback = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Pluto_TV_logo_2024.svg/220px-Pluto_TV_logo_2024.svg.png'
 
@@ -917,6 +920,14 @@ def main():
     # Parse requested providers from string
     provider_setting = args.provider.lower()
     selected_providers = [x.strip() for x in provider_setting.split(',')]
+
+    # Validation of providers
+    if "all" not in selected_providers:
+        invalid_providers = [p for p in selected_providers if p not in SUPPORTED_PROVIDERS]
+        if invalid_providers:
+            logging.error(f"Unknown provider(s): {', '.join(invalid_providers)}")
+            logging.info(f"Available providers are: {', '.join(SUPPORTED_PROVIDERS)} or 'all'")
+            return
 
     # Initialize requested services
     services = []
