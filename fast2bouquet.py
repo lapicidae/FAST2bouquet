@@ -3,6 +3,7 @@ import argparse
 import concurrent.futures
 import glob
 import hashlib
+import io
 import json
 import logging
 import os
@@ -46,10 +47,22 @@ RAKUTEN_CLASSIFICATIONS = {
     "rs": 266, "se": 282, "sk": 273, "uk": 18,
 }
 RAKUTEN_EPG_URLS = {
-    "de": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_DE_epg.xml",
-    "at": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_AT_epg.xml",
-    "ch": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_CH_epg.xml",
-    "uk": "https://raw.githubusercontent.com/dp247/rakuten-uk-epg/master/epg.xml"
+    "de": {
+        "url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_DE_epg.xml",
+        "credit": "Fellfresse"
+    },
+    "at": {
+        "url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_AT_epg.xml",
+        "credit": "Fellfresse"
+    },
+    "ch": {
+        "url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_CH_epg.xml",
+        "credit": "Fellfresse"
+    },
+    "uk": {
+        "url": "https://raw.githubusercontent.com/dp247/rakuten-uk-epg/master/epg.xml",
+        "credit": "dp247"
+    }
 }
 
 
@@ -69,7 +82,7 @@ def parse_args():
 
     # Provider group
     prov_group = parser.add_argument_group("Provider selection")
-    prov_group.add_argument("--provider", choices=["all", "plutotv", "rakutentv", "stvp"], default="all", help="Select which service(s) to generate")
+    prov_group.add_argument("--provider", default="all", help="Select which service(s) to generate ('all', 'plutotv', 'rakutentv', 'stvp' or a comma-separated list like 'plutotv,stvp')")
 
     # PlutoTV group
     plutotv_group = parser.add_argument_group("Pluto TV")
@@ -105,8 +118,10 @@ def parse_args():
     picon_group.add_argument("-d", "--download-picons", action="store_true", help="Download missing picons")
     picon_group.add_argument("-D", "--download-overwrite-picons", action="store_true", help="Download and overwrite existing picons")
     picon_group.add_argument("--picon-colorful", default="plutotv", help="Use colorful picons ('all', 'false', 'plutotv', 'rakutentv' or a comma-separated list like 'plutotv,rakutentv')")
+    picon_group.add_argument("--picon-size", default="220x132", help="Target picon size (e.g., 100x60, 220x132, 400x170, 400x240). Format: WIDTHxHEIGHT")
+    picon_group.add_argument("--picon-no-resize", dest="picon_resize", action="store_false", default=True, help="Keep original picon dimensions.")
     picon_group.add_argument("--picon-post-processing", default="stvp", help="Enable picon post-processing ('all', 'false', 'plutotv', 'rakutentv', 'stvp' or a comma-separated list like 'rakutentv,stvp')")
-    picon_group.add_argument("-f", "--picon-folder", help="Custom path to the picon directory (overrides default search order)")
+    picon_group.add_argument("--picon-folder", help="Custom path to the picon directory (overrides default search order)")
 
     # Technical group
     tec_group = parser.add_argument_group("Technical configuration")
@@ -533,7 +548,7 @@ def write_bouquets(bouquet_data, bouquet_dir, reverse=False):
             f.writelines(references)
         logging.info(f"Updated bouquets.tv and created {len(references)} bouquet files.")
 
-def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, conf_dir, channels_file, download_picons, one_bouquet, reverse_bouquets):
+def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, conf_dir, channels_file, download_picons, one_bouquet, reverse_bouquets, picon_size):
     """
     Process channel data to create bouquets and EPG channel maps.
 
@@ -559,6 +574,8 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
         If True, groups all channels into one bouquet with markers.
     reverse_bouquets : bool
         Whether to sort bouquet references in reverse order.
+    picon_size : str
+        Target picon size from args.picon_size (e.g. '220x132').
 
     Returns
     -------
@@ -579,6 +596,13 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
         bouquet_contents[main_filename].append(f"#NAME {provider_display}\n")
 
     current_marker = None
+
+    # Extract dimensions for providers that support URL-based resizing
+    try:
+        width, height = picon_size.lower().split('x')
+    except ValueError:
+        width, height = "220", "132"
+
     for c in channels:
         hex_sid_bouquet = f"{c['sid']:04X}"  # e.g.: 009B
         hex_sid_picon = f"{c['sid']:X}"      # e.g.: 9B
@@ -588,7 +612,14 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
         picon_name = f"{service_type}_0_1_{hex_sid_picon}_{tid}_0_0_0_0_0".upper()
 
         if download_picons and c['logo_url']:
-            picon_url = f"{c['logo_url']}?w=220&h=132"
+            picon_url = c['logo_url']
+
+            # Only append resizing parameters for PlutoTV URLs
+            if "pluto.tv" in picon_url:
+                # Append or update width/height parameters
+                separator = "&" if "?" in picon_url else "?"
+                picon_url = f"{picon_url}{separator}w={width}&h={height}"
+
             picon_list.append((picon_url, f"{picon_name}.png"))
 
         # Construct Enigma2 service entry
@@ -628,92 +659,162 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
     logging.info(f"EPG channels file created: {channels_file} ({len(xml_entries)} entries).")
     return picon_list
 
-def download_picons(args, picons, picon_folder, overwrite, post_process_active):
+def download_picons(picons, picon_folder, overwrite, post_process_active, resize_active, target_size, is_parallel):
     """
-    Downloads picons with optional parallel processing and post-processing.
-    
-    Uses a ThreadPoolExecutor to handle multiple network requests simultaneously
-    if parallel processing is enabled.
+    Download and process picons in RAM with unified parameter handling.
+
+    Parameters
+    ----------
+    picons : list of tuple
+        List of (url, filename) tuples.
+    picon_folder : str
+        Local path for saving picons.
+    overwrite : bool
+        Overwrite existing files.
+    post_process_active : bool
+        Enable rounded corners.
+    resize_active : bool
+        Enable resizing and canvas padding.
+    target_size : str
+        Target resolution (e.g., '220x132').
+    is_parallel : bool
+        Enable multi-threaded downloads.
     """
     if not picons:
         return
 
     os.makedirs(picon_folder, exist_ok=True)
 
-    def fetch_and_save(p_url, p_path):
-        """Worker function to download and optionally process a single picon."""
+    def fetch_and_process(p_url, p_path):
         if not overwrite and os.path.exists(p_path):
             return False
         try:
             req = urllib.request.Request(p_url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=10) as response:
-                with open(p_path, 'wb') as f:
-                    f.write(response.read())
+                img_data = io.BytesIO(response.read())
 
-            if post_process_active:
-                apply_rounded_corners(p_path)
+            with Image.open(img_data) as img:
+                img = img.convert("RGBA")
+
+                # Rounding logic
+                if post_process_active:
+                    img = apply_rounded_corners(img)
+
+                # Resizing logic
+                if resize_active:
+                    img = process_image(img, target_size)
+
+                # Final 8-bit optimization and storage write
+                img = img.quantize(colors=256, method=2).convert("RGBA")
+                img.save(p_path, "PNG", optimize=True)
+
             return True
-        except Exception:
+        except Exception as e:
+            logging.debug(f"Picon error ({p_url}): {e}")
             return False
 
-    is_parallel = getattr(args, 'parallel', False)
-
-    download_tasks = []
-    for url, filename in picons:
-        if url.startswith('http'):
-            full_path = os.path.join(picon_folder, filename)
-            download_tasks.append((url, full_path))
-
-    if not download_tasks:
+    tasks = [(url, os.path.join(picon_folder, fn)) for url, fn in picons if url.startswith('http')]
+    if not tasks:
         return
 
     count = 0
     if is_parallel:
-        logging.info("Downloading %d picons in parallel...", len(download_tasks))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-            future_to_url = {executor.submit(fetch_and_save, url, path): url for url, path in download_tasks}
-            for future in concurrent.futures.as_completed(future_to_url):
+        logging.info("Downloading %d picons in parallel...", len(tasks))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(fetch_and_process, url, path): url for url, path in tasks}
+            for future in concurrent.futures.as_completed(futures):
                 if future.result():
                     count += 1
     else:
-        logging.info("Downloading %d picons sequentially...", len(download_tasks))
-        for url, path in download_tasks:
-            if fetch_and_save(url, path):
+        logging.info("Downloading %d picons sequentially...", len(tasks))
+        for url, path in tasks:
+            if fetch_and_process(url, path):
                 count += 1
 
     if count > 0:
-        logging.info("Downloaded and processed %d new picons.", count)
+        logging.info("Successfully saved %d picons to flash.", count)
 
-def apply_rounded_corners(image_path):
+def process_image(img, target_size_str):
     """
-    Apply rounded corners to an image following Material Design principles.
+    Resize an Image object in memory using a transparent canvas to match aspect ratio.
 
     Parameters
     ----------
-    image_path : str
-        Path to the image file to be processed.
+    img : PIL.Image.Image
+        The image object to be processed.
+    target_size_str : str
+        Target resolution string in 'WIDTHxHEIGHT' format (e.g., '220x132').
+
+    Returns
+    -------
+    PIL.Image.Image
+        The processed and resized image object.
     """
     try:
-        with Image.open(image_path).convert("RGBA") as img:
-            # Calculate radius: ~10% of the smaller dimension for Material feel
-            width, height = img.size
-            radius = int(min(width, height) * 0.1)
+        t_w, t_h = map(int, target_size_str.lower().split('x'))
+        target_res = (t_w, t_h)
+        target_ratio = t_w / t_h
 
-            # Create a mask for rounded corners
-            mask = Image.new('L', img.size, 0)
-            draw = ImageDraw.Draw(mask)
-            draw.rounded_rectangle((0, 0, width, height), radius=radius, fill=255)
+        orig_w, orig_h = img.size
+        current_ratio = orig_w / orig_h
 
-            # Apply mask
-            result = Image.new('RGBA', img.size, (0, 0, 0, 0))
-            result.paste(img, (0, 0), mask=mask)
-            result.save(image_path, "PNG")
+        # Calculate canvas dimensions to prevent stretching
+        if current_ratio > target_ratio:
+            canvas_w = orig_w
+            canvas_h = int(orig_w / target_ratio)
+        else:
+            canvas_h = orig_h
+            canvas_w = int(orig_h * target_ratio)
+
+        # Create transparent canvas and center the original image
+        canvas = Image.new('RGBA', (canvas_w, canvas_h), (0, 0, 0, 0))
+        offset = ((canvas_w - orig_w) // 2, (canvas_h - orig_h) // 2)
+        canvas.paste(img, offset)
+
+        # Resize using LANCZOS for best quality
+        return canvas.resize(target_res, Image.Resampling.LANCZOS)
+    except Exception:
+        # Fallback to original image if processing fails
+        return img
+
+def apply_rounded_corners(img):
+    """
+    Apply rounded corners to an Image object using Material Design principles.
+
+    Parameters
+    ----------
+    img : PIL.Image.Image
+        The image object to be processed.
+
+    Returns
+    -------
+    PIL.Image.Image
+        The image object with rounded corners applied.
+    """
+    try:
+        width, height = img.size
+        # Radius: ~10% of the smaller dimension for a balanced look
+        radius = int(min(width, height) * 0.1)
+
+        # Create a transparency mask for the corners
+        mask = Image.new('L', (width, height), 0)
+        draw = ImageDraw.Draw(mask)
+        draw.rounded_rectangle((0, 0, width, height), radius=radius, fill=255)
+
+        # Apply the mask to a new transparent canvas
+        output = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+        output.paste(img, (0, 0), mask=mask)
+        return output
     except Exception as e:
-        logging.debug(f"Post-processing failed for {image_path}: {e}")
+        logging.debug(f"Rounding failed in RAM: {e}")
+        return img
 
 def create_epg_source(conf_dir, epg_source_file, channels_file, provider_name, service_key, langs):
     """
-    Create an XMLTV source file for EPGImport.
+    Create an XMLTV source file for EPGImport with Matt Huisman credits.
+
+    This function generates a .sources.xml file for the Enigma2 EPGImport plugin,
+    pointing to Matt Huisman's i.mjh.nz repository.
 
     Parameters
     ----------
@@ -747,25 +848,45 @@ def create_epg_source(conf_dir, epg_source_file, channels_file, provider_name, s
     except Exception as e:
         logging.error(f"EPG Source Error: {e}")
 
-def create_rakuten_epg_source(conf_dir, epg_source_file, channels_file, provider_name, region):
-    """Create an XMLTV source file specifically for Rakuten TV GitHub EPGs."""
-    epg_url = RAKUTEN_EPG_URLS.get(region)
-    if not epg_url:
-        logging.info(f"Rakuten TV EPG: No EPG URL available for region '{region}'. EPG creation skipped.")
-        return
+def create_rakuten_epg_source(conf_dir, source_file, channels_file, provider_name, region):
+    """
+    Create the EPG Import source file for Rakuten TV with specific provider credits.
 
-    path = os.path.join(conf_dir, epg_source_file)
+    Dynamically selects the correct EPG URL and attribution (credits) based 
+    on the region from the RAKUTEN_EPG_URLS dictionary.
+
+    Parameters
+    ----------
+    conf_dir : str
+        The directory where the EPG source file will be saved.
+    source_file : str
+        The filename of the resulting .sources.xml file.
+    channels_file : str
+        The filename of the associated .channels.xml file.
+    provider_name : str
+        The display name of the provider.
+    region : str
+        The region code (e.g., 'de', 'uk') to look up URL and credits.
+    """
+    region_data = RAKUTEN_EPG_URLS.get(region, {"url": "", "credit": "Unknown"})
+    epg_url = region_data["url"]
+    credits = region_data["credit"]
+
+    source_path = os.path.join(conf_dir, source_file)
     try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write('<?xml version="1.0" encoding="utf-8"?>\n<sources>\n')
-            f.write(f'\t<sourcecat sourcecatname="{provider_name}">\n')
-            f.write(f'\t\t<source type="gen_xmltv" nocheck="1" channels="{channels_file}">\n'
-                    f'\t\t\t<description>{provider_name} ({region.upper()})</description>\n'
-                    f'\t\t\t<url>{epg_url}</url>\n\t\t</source>\n')
-            f.write('\t</sourcecat>\n</sources>\n')
-        logging.info(f"EPG source file created: {epg_source_file}")
+        with open(source_path, 'w', encoding='utf-8') as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+            f.write('<sources>\n')
+            f.write(f'\t<sourcecat sourcecatname="{provider_name} ({credits})">\n')
+            f.write(f'\t\t<source name="{provider_name} EPG">\n')
+            f.write(f'\t\t\t<description>{provider_name} EPG ({region.upper()})</description>\n')
+            f.write(f'\t\t\t<url>{epg_url}</url>\n')
+            f.write(f'\t\t\t<channels>{channels_file}</channels>\n')
+            f.write('\t\t</source>\n')
+            f.write('\t</sourcecat>\n')
+            f.write('</sources>\n')
     except Exception as e:
-        logging.error(f"EPG Source Error: {e}")
+        logging.error(f"Failed to create Rakuten sources file: {e}")
 
 def reload_enigma2():
     """
@@ -790,9 +911,14 @@ def main():
     # Collective list for all channels
     all_channels_for_m3u = []
 
+    # Parse requested providers from string
+    provider_setting = args.provider.lower()
+    selected_providers = [x.strip() for x in provider_setting.split(',')]
+
     # Initialize requested services
     services = []
-    if args.provider in ["all", "plutotv"]:
+
+    if "all" in selected_providers or "plutotv" in selected_providers:
         services.append({
             'id': 'plutotv',
             'name': args.plutotv_provider_name,
@@ -800,7 +926,7 @@ def main():
             'epg_func': lambda c_file, s_file, srv_name: create_epg_source(conf_dir, s_file, c_file, srv_name, 'PlutoTV', PLUTOTV_EPG_LANGS)
         })
 
-    if args.provider in ["all", "rakutentv"]:
+    if "all" in selected_providers or "rakutentv" in selected_providers:
         services.append({
             'id': 'rakutentv',
             'name': args.rakutentv_provider_name,
@@ -808,7 +934,7 @@ def main():
             'epg_func': lambda c_file, s_file, srv_name: create_rakuten_epg_source(conf_dir, s_file, c_file, srv_name, args.rakutentv_region)
         })
 
-    if args.provider in ["all", "stvp"]:
+    if "all" in selected_providers or "stvp" in selected_providers:
         services.append({
             'id': 'stvp',
             'name': args.stvp_provider_name,
@@ -859,10 +985,12 @@ def main():
             continue
 
         clean_old_files(bouquet_dir, conf_dir, prefix, c_file)
-        
+
         do_download = args.download_picons or args.download_overwrite_picons
-        picons = process_channels(channels, prefix, tid, args.service_type, bouquet_dir, conf_dir, c_file, 
-                                  do_download, args.one_bouquet, args.reverse_bouquets)
+        picons = process_channels(
+            channels, prefix, tid, args.service_type, bouquet_dir, conf_dir, c_file, 
+            do_download, args.one_bouquet, args.reverse_bouquets, args.picon_size
+        )
 
         # --- Picon Post-Processing Logic ---
         # Determine if rounded corners should be applied for this specific provider.
@@ -871,7 +999,15 @@ def main():
         post_process_active = "all" in pp_list or srv['id'] in pp_list
 
         if do_download:
-            download_picons(args, picons, picon_folder, args.download_overwrite_picons, post_process_active)
+            download_picons(
+                picons, 
+                picon_folder, 
+                args.download_overwrite_picons, 
+                post_process_active, 
+                args.picon_resize, 
+                args.picon_size, 
+                args.parallel
+            )
 
         srv['epg_func'](c_file, s_file, srv['name'])
 
