@@ -96,7 +96,7 @@ def parse_args():
     plutotv_group = parser.add_argument_group("Pluto TV")
     plutotv_group.add_argument("--plutotv-provider-name", default="PlutoTV", help="Display name and file prefix for Pluto TV")
     plutotv_group.add_argument("--plutotv-tid", help="Manual hex transponder ID (auto-generated from provider name if omitted)")
-    plutotv_group.add_argument("--plutotv-source", default="https://boot.pluto.tv", help="Pluto TV JSON API URL")
+    plutotv_group.add_argument("--plutotv-source", default="https://boot.pluto.tv", help="Pluto TV API entry point")
     plutotv_group.add_argument("--plutotv-id-type", choices=["id", "slug"], default="id", help="Mapping type for EPG: 'id' (UUID) or 'slug' (human readable)")
 
     # Rakuten TV group

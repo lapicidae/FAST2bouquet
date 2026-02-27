@@ -29,9 +29,9 @@
 # Default: None
 # PLUTOTV_TID='029A'
 
-# Pluto TV JSON API URL.
-# Default: https://api.pluto.tv/v2/channels
-# PLUTOTV_SOURCE='https://api.pluto.tv/v2/channels'
+# Pluto TV API entry point.
+# Default: https://boot.pluto.tv
+# PLUTOTV_SOURCE='https://boot.pluto.tv'
 
 # Mapping type for EPG: 'id' (UUID) or 'slug' (human readable).
 # Default: id
@@ -136,6 +136,10 @@
 # Default: false
 # QUIET='true'
 
+# Disable automatic updates of the FAST Python script.
+# Default: false
+# DISABLE_UPDATE='true'
+
 # ------------------------------------------------------------------------------
 #  ADVANCED CONFIGURATION
 # ------------------------------------------------------------------------------
@@ -152,20 +156,54 @@
 #  SYSTEM & PATH DISCOVERY
 # ------------------------------------------------------------------------------
 PYTHON_BIN=$(command -v python3)
-SCRIPT_PATH="/usr/script/fast2bouquet.py"
+SCRIPT_NAME="fast2bouquet.py"
+SCRIPT_PATH="/usr/script/$SCRIPT_NAME"
+
+# Fallback: Use the directory of this wrapper as the script path.
+if [ ! -f "$SCRIPT_PATH" ]; then
+	SCRIPT_PATH="$(dirname "$0")/$SCRIPT_NAME"
+fi
 
 
 # ------------------------------------------------------------------------------
 #  ERROR HANDLING
 # ------------------------------------------------------------------------------
 if [ -z "$PYTHON_BIN" ]; then
-    printf "ERROR: 'python3' not found in PATH.\n" >&2
-    exit 1
+	printf "ERROR: 'python3' not found in PATH.\n" >&2
+	exit 1
 fi
 
 if [ ! -f "$SCRIPT_PATH" ]; then
-    printf "ERROR: Python script not found at: %s\n" "$SCRIPT_PATH" >&2
-    exit 1
+	printf "ERROR: Python script not found at: %s\n" "$SCRIPT_PATH" >&2
+	exit 1
+fi
+
+
+# ------------------------------------------------------------------------------
+#  AUTO-UPDATE LOGIC
+# ------------------------------------------------------------------------------
+REPO_URL="https://raw.githubusercontent.com/lapicidae/FAST2bouquet/main/$SCRIPT_NAME"
+DISABLE_UPDATE=${DISABLE_UPDATE:-false}
+
+if [ -w "$SCRIPT_PATH" ]; then
+	# Calculate local checksum
+	LOCAL_CK=$(cksum "$SCRIPT_PATH" | cut -d' ' -f1)
+	REMOTE_CK=$(curl -sL "$REPO_URL" | cksum | cut -d' ' -f1)
+
+	# Only continue if we actually got a valid remote checksum
+	if [ -n "$REMOTE_CK" ]; then
+		if [ "$LOCAL_CK" != "$REMOTE_CK" ]; then
+			if [ "$DISABLE_UPDATE" = "true" ]; then
+				printf "HINT: New version available at GitHub.\n"
+			else
+				printf "New version found. Updating %s...\n" "$SCRIPT_PATH"
+				# Final write only happens here, once.
+				if ! curl -s -L -o "$SCRIPT_PATH" "$REPO_URL"; then
+					printf "ERROR: Download failed."
+				fi
+			fi
+		fi
+	fi
 fi
 
 
@@ -205,29 +243,33 @@ set -- "$PYTHON_BIN" "$SCRIPT_PATH"
 
 # Special handling for Picons (Download vs Overwrite)
 if [ "$DOWNLOAD_PICONS" = "overwrite" ]; then
-    set -- "$@" --download-overwrite-picons
+	set -- "$@" --download-overwrite-picons
 elif [ "$DOWNLOAD_PICONS" = "true" ]; then
-    set -- "$@" --download-picons
+	set -- "$@" --download-picons
 fi
 
 # Advanced Flags (shellcheck disable SC2086 because we want splitting)
 if [ -n "$FLAGS" ]; then
-    # shellcheck disable=SC2086
-    set -- "$@" $FLAGS
+	# shellcheck disable=SC2086
+	set -- "$@" $FLAGS
 fi
 
 
 # ------------------------------------------------------------------------------
 #  EXECUTION
 # ------------------------------------------------------------------------------
-printf "Starting Pluto TV Update...\n"
+printf "Starting FAST TV Update...\n"
 
 "$@"
 RESULT=$?
 
 if [ $RESULT -eq 0 ]; then
-    printf "Update finished successfully.\n"
+	printf "Update finished successfully.\n"
 else
-    printf "Update failed with exit code %s.\n" "$RESULT" >&2
-    exit $RESULT
+	printf "Update failed with exit code %s.\n" "$RESULT" >&2
+	exit $RESULT
 fi
+
+
+# vim: ts=4 sw=4 noet:
+# kate: space-indent off; indent-width 4; mixed-indent off;
