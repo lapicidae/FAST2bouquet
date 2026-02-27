@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import concurrent.futures
+import datetime
 import glob
 import hashlib
 import io
@@ -8,6 +9,7 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 import urllib.request
 import uuid
 from collections import defaultdict
@@ -94,7 +96,7 @@ def parse_args():
     plutotv_group = parser.add_argument_group("Pluto TV")
     plutotv_group.add_argument("--plutotv-provider-name", default="PlutoTV", help="Display name and file prefix for Pluto TV")
     plutotv_group.add_argument("--plutotv-tid", help="Manual hex transponder ID (auto-generated from provider name if omitted)")
-    plutotv_group.add_argument("--plutotv-source", default="https://api.pluto.tv/v2/channels", help="Pluto TV JSON API URL")
+    plutotv_group.add_argument("--plutotv-source", default="https://boot.pluto.tv", help="Pluto TV JSON API URL")
     plutotv_group.add_argument("--plutotv-id-type", choices=["id", "slug"], default="id", help="Mapping type for EPG: 'id' (UUID) or 'slug' (human readable)")
 
     # Rakuten TV group
@@ -144,6 +146,7 @@ def parse_args():
 
     # Global switches
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress info messages, only log errors")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode (saves API responses to JSON files)")
 
     return parser.parse_args()
 
@@ -261,77 +264,189 @@ def clean_old_files(bouquet_dir, conf_dir, prefix, channels_file):
     if os.path.exists(c_path):
         os.remove(c_path)
 
-def fetch_plutotv_data(api_url, id_type, picon_color):
+def fetch_plutotv_data(api_url, id_type, picon_color, debug=False):
     """
-    Fetch and parse channel data from the Pluto TV JSON API.
+    Fetch and parse channel data from the Pluto TV JSON APIs.
 
     Parameters
     ----------
     api_url : str
-        The URL of the Pluto TV API.
+        The base URL for Pluto TV boot (API entry point).
     id_type : str
         The type of ID to use for tvg-id mapping ('slug' or 'id').
     picon_color : str
         The style of logo to fetch ('color' or 'solid').
+    debug : bool, optional
+        If True, raw API responses are saved to local JSON files.
 
     Returns
     -------
     list of dict
         A list containing dictionaries with channel metadata and stream URLs.
     """
+    # Fetch app version (Browser-like)
+    app_version = 'unknown'
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
     try:
-        req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response:
-            data = json.loads(response.read().decode('utf-8'))
+        req = urllib.request.Request("https://pluto.tv/", headers={'User-Agent': user_agent})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html = response.read().decode('utf-8')
+            match = re.search(r'name="appVersion"[^>]*content="([^"]+)"', html) or \
+                    re.search(r'"appVersion"\s*:\s*"([^"]+)"', html)
+            if match:
+                app_version = match.group(1)
+    except Exception:
+        pass
+
+    # Boot sequence
+    device_id = str(uuid.uuid1())
+    client_time = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+    boot_params = {
+        'appName': 'web',
+        'appVersion': app_version,
+        'clientTime': client_time,
+        'deviceDNT': '0',
+        'clientId': device_id,
+        'clientModelNumber': '1.0.0',
+        'clientModelName': 'Chrome',
+        'clientModel': 'web',
+        'clientType': 'web',
+        'deviceVersion': '145.0.0',
+        'drmCapabilities': 'widevine:L3',
+        'includeExtendedEvents': 'false',
+        'serverSideAds': 'false',
+        'deviceMake': 'chrome',
+        'deviceType': 'web',
+        'deviceModel': 'web',
+        'notificationVersion': '1',
+        'appLaunchCount': '1',
+        'lastAppLaunchDate': ''
+    }
+
+    boot_url = f"{api_url.rstrip('/')}/v4/start?{urllib.parse.urlencode(boot_params)}"
+
+    try:
+        req = urllib.request.Request(boot_url, headers={'User-Agent': user_agent})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            boot_raw = response.read().decode('utf-8')
+            if debug:
+                with open("debug_plutotv-boot.json", "w", encoding="utf-8") as f:
+                    f.write(boot_raw)
+            boot_data = json.loads(boot_raw)
+
+        session_token = boot_data.get('sessionToken')
+        servers = boot_data.get('servers', {})
+        stitcher_url = (servers.get('stitcher') or servers.get('stitcherDash', '')).rstrip('/')
+        channels_url = servers.get('channels', '').rstrip('/')
+
+        if not session_token or not stitcher_url:
+            logging.error("Pluto TV: Boot failed.")
+            return []
     except Exception as e:
-        logging.error(f"Error fetching data: {e}")
+        logging.error(f"Pluto TV boot error: {e}")
+        return []
+
+    # Fetch Categories
+    category_map = {}
+    categories_api = f"{channels_url}/v2/guide/categories"
+    try:
+        req = urllib.request.Request(categories_api, headers={'Authorization': f'Bearer {session_token}', 'User-Agent': user_agent})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            cat_raw = response.read().decode('utf-8')
+            if debug:
+                with open("debug_plutotv-categories.json", "w", encoding="utf-8") as f:
+                    f.write(cat_raw)
+            cat_json = json.loads(cat_raw)
+            # Handle data.data or data directly
+            cat_list = cat_json.get("data", cat_json) if isinstance(cat_json, dict) else cat_json
+            for cat in cat_list:
+                category_map[cat.get("id")] = cat.get("name")
+    except Exception:
+        pass
+
+    # Fetch Channels
+    channels_api = f"{channels_url}/v2/guide/channels?offset=0&limit=1000&sort=number%3Aasc"
+    try:
+        req = urllib.request.Request(channels_api, headers={'Authorization': f'Bearer {session_token}', 'User-Agent': user_agent})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            channels_raw = response.read().decode('utf-8')
+            if debug:
+                with open("debug_plutotv-channels.json", "w", encoding="utf-8") as f:
+                    f.write(channels_raw)
+            chan_json = json.loads(channels_raw)
+            channel_list = chan_json.get("data", chan_json) if isinstance(chan_json, dict) else chan_json
+    except Exception as e:
+        logging.error(f"Pluto TV channels error: {e}")
         return []
 
     channels = []
-    # Generate unique session identifiers for the stream URLs
-    dev_id, session_id = str(uuid.uuid4()), str(uuid.uuid4())
-    url_mask = (
-        "https://cfd-v4-service-channel-stitcher-use1-1.prd.pluto.tv/stitch/hls/channel/{_id}/master.m3u8?"
-        "appName=web&appVersion=9.19.0&deviceDNT=0&deviceId={dev_id}&deviceMake=firefox"
-        "&deviceModel=web&deviceType=web&deviceVersion=147.0.0&serverSideAds=false&sid={sid}"
-    )
-    for item in data:
-        _id = item.get("_id")
-        if not _id:
+    for item in channel_list:
+        _id = item.get("id") or item.get("_id")
+        stitched = item.get("stitched", {})
+
+        # Path extraction
+        stitched_path = stitched.get("path")
+        if not stitched_path:
+            paths = stitched.get("paths", [])
+            for p in paths:
+                if p.get("type") == "hls" or not p.get("type"):
+                    stitched_path = p.get("path")
+                    break
+        if not stitched_path:
+            urls = stitched.get("urls", [])
+            if urls and urls[0].get("url"):
+                stitched_path = urls[0].get("url")
+
+        if not _id or not item.get("isStitched") or not stitched_path:
             continue
 
-        # Clean metadata and ensure fallback for channel identification
-        name = item.get("name", "Unknown").strip()
-        category = (item.get("category") or "Uncategorized").strip()
-        channel_id = (item.get("slug") if id_type == "slug" else _id) or _id
+        # URL Construction
+        # We ensure the URL starts with /v2/stitch...
+        clean_path = stitched_path
+        if not clean_path.startswith('/v2'):
+            clean_path = '/v2' + clean_path
 
-        # Get paths and treat "missing.png" as an empty string to trigger fallback logic
-        color_path = item.get("colorLogoPNG", {}).get("path", "")
-        if "missing.png" in color_path:
-            color_path = ""
+        # Parse existing query params from the path
+        parsed_path = urllib.parse.urlparse(clean_path)
+        query_params = urllib.parse.parse_qs(parsed_path.query)
 
-        solid_path = item.get("solidLogoPNG", {}).get("path", "")
-        if "missing.png" in solid_path:
-            solid_path = ""
+        # Add/Override session parameters
+        query_params['jwt'] = [session_token]
+        query_params['masterJWTPassthrough'] = ['1']
 
-        # Fallback Picon URL from Wikimedia
-        wikimedia_fallback = 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Pluto_TV_logo_2024.svg/220px-Pluto_TV_logo_2024.svg.png'
+        # Build final stream URL
+        new_query = urllib.parse.urlencode(query_params, doseq=True)
+        # Combine base, path and new query
+        stream_url = f"{stitcher_url}{parsed_path.path}?{new_query}"
 
-        # Fallback logic: Choice -> Alternative -> Wikimedia
-        if picon_color == "solid":
-            logo_url = solid_path or color_path or wikimedia_fallback
-        else:
-            logo_url = color_path or solid_path or wikimedia_fallback
+        # Category mapping
+        cat_ids = item.get("categoryIDs", [])
+        category_name = category_map.get(cat_ids[0]) if cat_ids and cat_ids[0] in category_map else "Uncategorized"
+
+        # Logo handling
+        images = item.get("images", [])
+        c_logo, s_logo = "", ""
+        for img in images:
+            img_url = img.get("url") or img.get("path")
+            if img.get("type") == "colorLogoPNG":
+                c_logo = img_url
+            elif img.get("type") == "solidLogoPNG":
+                s_logo = img_url
+
+        logo_url = (s_logo if picon_color == "solid" else c_logo) or c_logo or s_logo or 'https://images.pluto.tv/channels/default/logo.png'
 
         channels.append({
             "sid": get_stable_sid(_id),
-            "ch_number": item.get("number") if item.get("number") is not None else 999999,
-            "name": name,
-            "category": category,
-            "channel_id": channel_id,
+            "ch_number": item.get("number", 9999),
+            "name": item.get("name", "Unknown").strip(),
+            "category": category_name.strip(),
+            "channel_id": item.get("slug") if id_type == "slug" else _id,
             "logo_url": logo_url,
-            "url": url_mask.format(_id=_id, dev_id=dev_id, sid=session_id)
+            "url": stream_url,
+            "user_agent": user_agent
         })
+
     return channels
 
 def fetch_rakutentv_data(args, region, picon_color):
@@ -979,7 +1094,7 @@ def main():
         services.append({
             'id': 'plutotv',
             'name': args.plutotv_provider_name,
-            'fetch_func': lambda mode: fetch_plutotv_data(args.plutotv_source, args.plutotv_id_type, mode),
+            'fetch_func': lambda mode: fetch_plutotv_data(args.plutotv_source, args.plutotv_id_type, mode, args.debug),
             'epg_func': lambda c_file, s_file, srv_name: create_epg_source(conf_dir, s_file, c_file, srv_name, 'PlutoTV', PLUTOTV_EPG_LANGS)
         })
 
@@ -1086,7 +1201,7 @@ def main():
 
     # Playlist path determination
     playlist_arg = args.playlist_only or args.playlist
-    
+
     if playlist_arg:
         # Get system paths: index 1 is bouquet_path (/etc/enigma2 or current dir)
         _, playlist_folder, _ = get_system_paths(playlist_arg if os.path.isdir(playlist_arg) else None)
@@ -1104,7 +1219,7 @@ def main():
             # Separate files mode: Group by the tagged provider name
             from collections import OrderedDict
             provider_groups = OrderedDict()
-            
+
             for c in all_channels_for_m3u:
                 p_name = c.get('provider_name', 'Other')
                 if p_name not in provider_groups:

@@ -18,6 +18,7 @@ This tool uses processed data and/or logic inspired by:
 
 * [Matt Huisman](https://i.mjh.nz) *([donate](https://i.mjh.nz/~~SUPPORT_ME~~))*
 * [pandvan](https://github.com/pandvan/rakuten-m3u-generator)
+* [BellezaEmporium](https://github.com/BellezaEmporium/PlutoIPTV)
 
 XMLTV sources:
 
