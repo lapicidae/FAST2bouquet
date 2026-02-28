@@ -52,22 +52,29 @@ RAKUTEN_CLASSIFICATIONS = {
 }
 
 
-# EPG/XMLTV Configuration
+# --- Central Provider Configuration ---
 #
-# This dictionary centralizes all provider-specific metadata for EPG generation.
+# This dictionary centralizes all provider-specific metadata for EPG generation,
+# M3U metadata (KODi), and channel sourcing.
+#
 # Logic for field usage:
-# - credit: Default author/source name if not overridden by region.
-# - type_attr: Template for the <source> tag attributes. 
-#              Supports {channels} and {name} placeholders.
+# - credit:        Default author/source name for the EPG (used in .sources.xml).
+# - logo:          URL to the provider's official logo (used for KODi provider-logo tag).
+# - type_attr:     Template for the <source> tag attributes in EPGImport sources.
+#                  Supports {channels} and {name} placeholders.
 # - desc_template: Template for the <description> tag in EPGImport.
 #                  Supports {name}, {val} (lowercase), and {val_upper} (uppercase).
-# - url_template: List of URL patterns for providers with consistent naming schemes.
-# - channels_tag: Boolean. If True, a separate <channels> element is created 
-#                 instead of using the attribute in the <source> tag.
-# - regions: Dictionary for providers where URLs or credits differ per region.
-EPG_CONFIG = {
+# - url_template:  List of URL patterns for providers with consistent naming schemes.
+#                  The {val} placeholder is replaced by the region code.
+# - channels_tag:  Boolean. If True, a separate <channels> element is created 
+#                  instead of using the channels attribute in the <source> tag.
+# - regions:       Dictionary for region-specific overrides:
+#                  - url:    Direct XMLTV URL (overrides url_template if present).
+#                  - credit: Region-specific author (overrides global credit).
+PROVIDER_CONFIG = {
     'plutotv': {
         'credit': 'Matt Huisman',
+        'logo': 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Pluto_TV_logo_2024.svg/604px-Pluto_TV_logo_2024.svg.png',
         'type_attr': 'type="gen_xmltv" nocheck="1" channels="{channels}"',
         'url_template': [
             'https://i.mjh.nz/PlutoTV/{val}.xml.gz', 
@@ -78,9 +85,10 @@ EPG_CONFIG = {
             'all': {},
             'ar': {}, 'br': {}, 'ca': {}, 'cl': {}, 'de': {}, 'dk': {}, 'es': {},
             'fr': {}, 'gb': {}, 'it': {}, 'mx': {}, 'no': {}, 'se': {}, 'us': {}
-        },
+        }
     },
     'rakutentv': {
+        'logo': 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Rakuten_TV_logo.svg/800px-Rakuten_TV_logo.svg.png',
         'type_attr': 'name="{name}"',
         'desc_template': '{name} ({val_upper})',
         'channels_tag': True,
@@ -105,6 +113,7 @@ EPG_CONFIG = {
     },
     'stvp': {
         'credit': 'Matt Huisman',
+        'logo': 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/bd/Samsung_TV_Plus_logo.svg/406px-Samsung_TV_Plus_logo.svg.png',
         'type_attr': 'type="gen_xmltv" nocheck="1" channels="{channels}"',
         'url_template': [
             'https://i.mjh.nz/SamsungTVPlus/{val}.xml.gz', 
@@ -114,7 +123,7 @@ EPG_CONFIG = {
         'regions': {
             'all': {}, 'at': {}, 'ca': {}, 'ch': {}, 'de': {}, 'es': {},
             'fr': {}, 'gb': {}, 'in': {}, 'it': {}, 'kr': {}, 'us': {}
-        },
+        }
     }
 }
 
@@ -153,7 +162,7 @@ def parse_args():
 
     # Samsung TV Plus group
     stvp_group = parser.add_argument_group("Samsung TV Plus")
-    stvp_group.add_argument("--stvp-region", choices=list(EPG_CONFIG['stvp']['regions'].keys()), default="de", help="Regional subset for Samsung TV Plus")
+    stvp_group.add_argument("--stvp-region", choices=list(PROVIDER_CONFIG['stvp']['regions'].keys()), default="de", help="Regional subset for Samsung TV Plus")
     stvp_group.add_argument("--stvp-provider-name", default="SamsungTVPlus", help="Display name and file prefix for Samsung TV Plus")
     stvp_group.add_argument("--stvp-tid", help="Manual hex transponder ID (auto-generated from provider name if omitted)")
     stvp_group.add_argument("--stvp-source", default="https://i.mjh.nz/SamsungTVPlus/.channels.json", help="Samsung TV Plus JSON API URL")
@@ -717,9 +726,16 @@ def create_m3u_playlist(channels, output_file, epg_urls=None):
                 chno = c.get('m3u_chno', 0)
                 ua = c.get('user_agent')
 
-                # Fixed keys: using 'channel_id' instead of 'tvg_id'
+                # Provider Infos for KODi (IPTV Simple PVR)
+                p_id = c.get('provider_id')
+                p_cfg = PROVIDER_CONFIG.get(p_id, {})
+                p_name = c.get('provider_name', 'Other')
+                p_logo = p_cfg.get('logo', '')
+
                 f.write(f'#EXTINF:-1 tvg-id="{c["channel_id"]}" tvg-chno="{chno}" '
-                        f'tvg-logo="{logo}" group-title="{group}",{c["name"]}\n')
+                        f'tvg-logo="{logo}" group-title="{group}" '
+                        f'provider="{p_name}" provider-type="iptv" provider-logo="{p_logo}",'
+                        f'{c["name"]}\n')
                 if ua:
                     f.write(f'#EXTVLCOPT:http-user-agent={ua}\n')
                 f.write(f'{c["url"]}\n')
@@ -1035,7 +1051,7 @@ def get_epg_urls(p_id, regions):
         A single region code or a list of codes to process.
     """
     urls = []
-    cfg = EPG_CONFIG.get(p_id, {})
+    cfg = PROVIDER_CONFIG.get(p_id, {})
     allowed = list(cfg.get('regions', {}).keys())
 
     region_list = [regions] if isinstance(regions, str) else regions
@@ -1080,7 +1096,7 @@ def generate_epg_source(conf_dir, source_file, channels_file, provider_id, provi
     values : list or dict
         List of regions or dictionary with region details.
     """
-    cfg = EPG_CONFIG.get(provider_id)
+    cfg = PROVIDER_CONFIG.get(provider_id)
     if not cfg:
         logging.error(f"No EPG configuration found for provider ID: {provider_id}")
         return
@@ -1176,7 +1192,7 @@ def main():
             'id': 'plutotv',
             'name': args.plutotv_provider_name,
             'fetch_func': lambda mode: fetch_plutotv_data(args.plutotv_source, args.plutotv_id_type, mode, args.debug),
-            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'plutotv', srv_name, EPG_CONFIG['plutotv']['regions'])
+            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'plutotv', srv_name, PROVIDER_CONFIG['plutotv']['regions'])
         })
 
     if "all" in selected_providers or "rakutentv" in selected_providers:
@@ -1192,7 +1208,7 @@ def main():
             'id': 'stvp',
             'name': args.stvp_provider_name,
             'fetch_func': lambda mode: fetch_stvp_data(args.stvp_source, args.stvp_region, mode, args.stvp_ignore_blacklist),
-            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'stvp', srv_name, EPG_CONFIG['stvp']['regions'])
+            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'stvp', srv_name, PROVIDER_CONFIG['stvp']['regions'])
         })
 
     # Sort services based on the order in --provider or apply reverse if requested
