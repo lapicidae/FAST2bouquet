@@ -671,39 +671,42 @@ def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
             })
     return channels
 
-def create_m3u_playlist(channels, output_file):
+def create_m3u_playlist(channels, output_file, epg_urls=None):
     """
-    Create an M3U playlist file from a list of channels.
+    Create an M3U playlist file with optional x-tvg-url header.
 
     Parameters
     ----------
     channels : list of dict
-        The list of channel dictionaries containing name, url, logo, etc.
+        The list of channel dictionaries.
     output_file : str
-        The full path and filename where the M3U should be saved.
-
-    Returns
-    -------
-    None
+        The full path and filename for the M3U.
+    epg_urls : list of str, optional
+        List of XMLTV URLs to include in the header.
     """
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
-            f.write("#EXTM3U\n")
+            header = "#EXTM3U"
+            if epg_urls:
+                unique_urls = ",".join(sorted(list(set(filter(None, epg_urls)))))
+                header += f' x-tvg-url="{unique_urls}"'
+            f.write(f"{header}\n")
+
             for c in channels:
                 logo = c.get('logo_url', '')
                 group = c.get('category', 'Uncategorized')
                 chno = c.get('m3u_chno', 0)
                 ua = c.get('user_agent')
 
-                f.write(f'#EXTINF:-1 tvg-id="{c["channel_id"]}" tvg-chno="{chno}" tvg-logo="{logo}" group-title="{group}",{c["name"]}\n')
-                # Add user-agent property for M3U players
+                # Fixed keys: using 'channel_id' instead of 'tvg_id'
+                f.write(f'#EXTINF:-1 tvg-id="{c["channel_id"]}" tvg-chno="{chno}" '
+                        f'tvg-logo="{logo}" group-title="{group}",{c["name"]}\n')
                 if ua:
-                    # This tag is the standard for players such as VLC or TiviMate
-                    f.write(f'#EXTVLCOPT:http-user-agent={ua}\n') #
+                    f.write(f'#EXTVLCOPT:http-user-agent={ua}\n')
                 f.write(f'{c["url"]}\n')
-        logging.info(f"M3U playlist created: {output_file} ({len(channels)} entries)")
+        logging.info(f"M3U playlist created: {output_file}")
     except Exception as e:
-        logging.error(f"Failed to create M3U playlist {output_file}: {e}")
+        logging.error(f"M3U Error: {e}")
 
 def write_bouquets(bouquet_data, bouquet_dir, reverse=False):
     """
@@ -1178,6 +1181,7 @@ def main():
         # Sequential numbering and provider tagging for M3U
         for c in channels:
             c['provider_name'] = srv['name']
+            c['provider_id'] = srv['id']
 
         all_channels_for_m3u.extend(channels)
 
@@ -1211,42 +1215,92 @@ def main():
 
         srv['epg_func'](c_file, s_file, srv['name'])
 
-    # Playlist path determination
+   # --- Playlist Creation Logic ---
     playlist_arg = args.playlist_only or args.playlist
 
     if playlist_arg:
-        # Get system paths: index 1 is bouquet_path (/etc/enigma2 or current dir)
+        def get_urls(p_id, regions):
+            """
+            Extract EPG URLs from the central configuration for specific regions.
+
+            Parameters
+            ----------
+            p_id : str
+                The provider identifier (e.g., 'plutotv', 'stvp', 'rakutentv').
+            regions : str or list of str
+                A single region code or a list of codes to process.
+
+            Returns
+            -------
+            list of str
+                A list of unique, formatted EPG URLs.
+            """
+            urls = []
+            cfg = EPG_CONFIG.get(p_id, {})
+            region_list = [regions] if isinstance(regions, str) else regions
+            
+            for r in region_list:
+                if r == 'all':
+                    # Fallback to regions_list for Pluto/STVP or keys for Rakuten
+                    r_set = cfg.get('regions_list', []) or list(cfg.get('regions', {}).keys())
+                    for sub_r in r_set:
+                        urls.extend(get_urls(p_id, sub_r))
+                    continue
+
+                if p_id == 'rakutentv':
+                    u = cfg.get('regions', {}).get(r, {}).get('url')
+                    if u:
+                        urls.append(u)
+                else:
+                    templates = cfg.get('url_template', [])
+                    urls.extend([t.format(val=r) for t in templates])
+            return list(set(urls))
+
         _, playlist_folder, _ = get_system_paths(playlist_arg if os.path.isdir(playlist_arg) else None)
 
         if args.one_playlist:
-            # Combined file mode: Use DEFAULT_M3U_NAME
+            # All-In-One Logic (working)
             full_path = playlist_arg if playlist_arg.endswith('.m3u') else os.path.join(playlist_folder, DEFAULT_M3U_NAME)
-
-            # Reset counter for single playlist
+            all_epg_urls = []
+            if "plutotv" in selected_providers:
+                all_epg_urls.extend(get_urls('plutotv', 'de')) # or use args
+            if "stvp" in selected_providers:
+                all_epg_urls.extend(get_urls('stvp', args.stvp_region))
+            if "rakutentv" in selected_providers:
+                all_epg_urls.extend(get_urls('rakutentv', args.rakutentv_region))
+            
             for i, c in enumerate(all_channels_for_m3u, start=1):
                 c['m3u_chno'] = i
-
-            create_m3u_playlist(all_channels_for_m3u, full_path)
+            create_m3u_playlist(all_channels_for_m3u, full_path, all_epg_urls)
         else:
-            # Separate files mode: Group by the tagged provider name
+            # Separate Files Logic (Fixed grouping and filtering)
             from collections import OrderedDict
             provider_groups = OrderedDict()
-
             for c in all_channels_for_m3u:
-                p_name = c.get('provider_name', 'Other')
-                if p_name not in provider_groups:
-                    provider_groups[p_name] = []
-                provider_groups[p_name].append(c)
+                p_id = c.get('provider_id')
+                if p_id not in provider_groups:
+                    provider_groups[p_id] = {'name': c.get('provider_name'), 'channels': []}
+                provider_groups[p_id]['channels'].append(c)
 
-            for p_name, p_channels in provider_groups.items():
+            for p_id, group_data in provider_groups.items():
+                p_name = group_data['name']
+                p_channels = group_data['channels']
                 filename = f"iptv_{p_name}.m3u"
                 full_path = os.path.join(playlist_folder, filename)
+                
+                # Fetch URLs based on the stored provider_id
+                p_urls = []
+                if p_id == 'plutotv':
+                    # Use 'de' as default or consider using PLUTOTV_EPG_LANGS
+                    p_urls = get_urls('plutotv', 'de')
+                elif p_id == 'stvp':
+                    p_urls = get_urls('stvp', args.stvp_region)
+                elif p_id == 'rakutentv':
+                    p_urls = get_urls('rakutentv', args.rakutentv_region)
 
-                # Reset counter for EACH provider playlist
                 for i, c in enumerate(p_channels, start=1):
                     c['m3u_chno'] = i
-
-                create_m3u_playlist(p_channels, full_path)
+                create_m3u_playlist(p_channels, full_path, p_urls)
 
     if not args.not_reload and not args.playlist_only:
         reload_enigma2()
