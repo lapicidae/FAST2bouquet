@@ -28,11 +28,7 @@ SUPPORTED_PROVIDERS = ['plutotv', 'rakutentv', 'stvp']
 # Playlist Configuration
 DEFAULT_M3U_NAME = "iptv_FAST.m3u"
 
-# Pluto TV Specifics
-PLUTOTV_EPG_LANGS = ['all', 'ar', 'br', 'ca', 'cl', 'de', 'dk', 'es', 'fr', 'gb', 'it', 'mx', 'no', 'se', 'us']
-
 # Samsung TV Plus Specifics
-STVP_REGIONS = ['all', 'at', 'ca', 'ch', 'de', 'es', 'fr', 'gb', 'in', 'it', 'kr', 'us']
 STVP_BLACKLIST = [
     "DE1000002V4",      # SMTOWN
     "DE3000016Q",       # Sony One Comedy TV
@@ -77,17 +73,34 @@ EPG_CONFIG = {
             'https://i.mjh.nz/PlutoTV/{val}.xml.gz', 
             'https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/PlutoTV/{val}.xml.gz'
         ],
-        'desc_template': '{name} ({val_upper})'
+        'desc_template': '{name} ({val_upper})',
+        'regions': {
+            'all': {},
+            'ar': {}, 'br': {}, 'ca': {}, 'cl': {}, 'de': {}, 'dk': {}, 'es': {},
+            'fr': {}, 'gb': {}, 'it': {}, 'mx': {}, 'no': {}, 'se': {}, 'us': {}
+        },
     },
     'rakutentv': {
         'type_attr': 'name="{name}"',
         'desc_template': '{name} ({val_upper})',
         'channels_tag': True,
         'regions': {
-            "de": {"url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_DE_epg.xml", "credit": "Fellfresse"},
-            "at": {"url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_AT_epg.xml", "credit": "Fellfresse"},
-            "ch": {"url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_CH_epg.xml", "credit": "Fellfresse"},
-            "uk": {"url": "https://raw.githubusercontent.com/dp247/rakuten-uk-epg/master/epg.xml", "credit": "dp247"}
+            'de': {
+                'url': 'https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_DE_epg.xml',
+                'credit': 'Fellfresse'
+            },
+            'at': {
+                'url': 'https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_AT_epg.xml',
+                'credit': 'Fellfresse'
+            },
+            'ch': {
+                'url': 'https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_CH_epg.xml',
+                'credit': 'Fellfresse'
+            },
+            'uk': {
+                'url': 'https://raw.githubusercontent.com/dp247/rakuten-uk-epg/master/epg.xml',
+                'credit': 'dp247'
+            }
         }
     },
     'stvp': {
@@ -97,7 +110,11 @@ EPG_CONFIG = {
             'https://i.mjh.nz/SamsungTVPlus/{val}.xml.gz', 
             'https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/SamsungTVPlus/{val}.xml.gz'
         ],
-        'desc_template': '{name} ({val_upper})'
+        'desc_template': '{name} ({val_upper})',
+        'regions': {
+            'all': {}, 'at': {}, 'ca': {}, 'ch': {}, 'de': {}, 'es': {},
+            'fr': {}, 'gb': {}, 'in': {}, 'it': {}, 'kr': {}, 'us': {}
+        },
     }
 }
 
@@ -136,7 +153,7 @@ def parse_args():
 
     # Samsung TV Plus group
     stvp_group = parser.add_argument_group("Samsung TV Plus")
-    stvp_group.add_argument("--stvp-region", choices=STVP_REGIONS, default="de", help="Regional subset for Samsung TV Plus")
+    stvp_group.add_argument("--stvp-region", choices=list(EPG_CONFIG['stvp']['regions'].keys()), default="de", help="Regional subset for Samsung TV Plus")
     stvp_group.add_argument("--stvp-provider-name", default="SamsungTVPlus", help="Display name and file prefix for Samsung TV Plus")
     stvp_group.add_argument("--stvp-tid", help="Manual hex transponder ID (auto-generated from provider name if omitted)")
     stvp_group.add_argument("--stvp-source", default="https://i.mjh.nz/SamsungTVPlus/.channels.json", help="Samsung TV Plus JSON API URL")
@@ -367,6 +384,7 @@ def fetch_plutotv_data(api_url, id_type, picon_color, debug=False):
         servers = boot_data.get('servers', {})
         stitcher_url = (servers.get('stitcher') or servers.get('stitcherDash', '')).rstrip('/')
         channels_url = servers.get('channels', '').rstrip('/')
+        region = boot_data.get("session", {}).get("activeRegion", "de").lower()
 
         if not session_token or not stitcher_url:
             logging.error("Pluto TV: Boot failed.")
@@ -472,7 +490,8 @@ def fetch_plutotv_data(api_url, id_type, picon_color, debug=False):
             "channel_id": item.get("slug") if id_type == "slug" else _id,
             "logo_url": logo_url,
             "url": stream_url,
-            "user_agent": user_agent
+            "user_agent": user_agent,
+            "region": region
         })
 
     return channels
@@ -688,7 +707,7 @@ def create_m3u_playlist(channels, output_file, epg_urls=None):
         with open(output_file, 'w', encoding='utf-8') as f:
             header = "#EXTM3U"
             if epg_urls:
-                unique_urls = ",".join(sorted(list(set(filter(None, epg_urls)))))
+                unique_urls = ",".join(list(dict.fromkeys(filter(None, epg_urls))))
                 header += f' x-tvg-url="{unique_urls}"'
             f.write(f"{header}\n")
 
@@ -1004,6 +1023,44 @@ def apply_rounded_corners(img):
         logging.debug(f"Rounding failed in RAM: {e}")
         return img
 
+def get_epg_urls(p_id, regions):
+    """
+    Extract EPG URLs from the central configuration for specific regions.
+
+    Parameters
+    ----------
+    p_id : str
+        The provider identifier (e.g., 'plutotv', 'stvp', 'rakutentv').
+    regions : str or list of str
+        A single region code or a list of codes to process.
+    """
+    urls = []
+    cfg = EPG_CONFIG.get(p_id, {})
+    allowed = list(cfg.get('regions', {}).keys())
+
+    region_list = [regions] if isinstance(regions, str) else regions
+
+    for r in region_list:
+        if r == 'all':
+            for sub_r in allowed:
+                if sub_r != 'all':
+                    urls.extend(get_epg_urls(p_id, sub_r))
+            continue
+
+        if r not in allowed:
+            logging.warning(f"EPG region '{r}' not supported for provider '{p_id}'.")
+            continue
+
+        if p_id == 'rakutentv':
+            u = cfg.get('regions', {}).get(r, {}).get('url')
+            if u:
+                urls.append(u)
+        else:
+            templates = cfg.get('url_template', [])
+            urls.extend([t.format(val=r) for t in templates])
+
+    return list(dict.fromkeys(urls))
+
 def generate_epg_source(conf_dir, source_file, channels_file, provider_id, provider_name, values):
     """
     Generate an XMLTV source file for EPGImport based on central configuration.
@@ -1013,32 +1070,41 @@ def generate_epg_source(conf_dir, source_file, channels_file, provider_id, provi
     conf_dir : str
         Directory path for saving the source file.
     source_file : str
-        Filename of the generated source XML.
+        Name of the source XML file to create.
     channels_file : str
-        Reference filename of the associated channels XML.
+        Name of the channels XML file reference.
     provider_id : str
-        Identifier of the provider ('plutotv', 'stvp', 'rakutentv') to fetch config.
+        Internal ID of the provider.
     provider_name : str
-        Display name for the source category.
-    values : list of str
-        List of region or language codes to generate sources for.
+        Display name of the provider.
+    values : list or dict
+        List of regions or dictionary with region details.
     """
     cfg = EPG_CONFIG.get(provider_id)
     if not cfg:
         logging.error(f"No EPG configuration found for provider ID: {provider_id}")
         return
 
-    # Determine overall credit dynamically (Rakuten uses region-specific credits)
-    if provider_id == 'rakutentv' and values:
-        credit = cfg.get('regions', {}).get(values[0], {}).get('credit', 'Unknown')
+    # Prepare region mapping for lookup
+    region_avail = cfg.get('regions', {})
+
+    # Identify the first valid region to extract a credit/author
+    val_list = values if isinstance(values, list) else list(values.keys())
+    first_val = next((v for v in val_list if v != 'all'), None)
+
+    # PRIORITY: 1. Region-specific credit -> 2. Global provider credit -> 3. Unknown
+    credit = 'Unknown'
+    if first_val and first_val in region_avail:
+        credit = region_avail[first_val].get('credit') or cfg.get('credit', 'Unknown')
     else:
         credit = cfg.get('credit', 'Unknown')
 
-    path = os.path.join(conf_dir, source_file)
+    source_path = os.path.join(conf_dir, source_file)
     try:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write('<?xml version="1.0" encoding="utf-8"?>\n<sources>\n')
-            f.write(f'\t<sourcecat sourcecatname="{provider_name} ({credit})">\n')
+        with open(source_path, 'w', encoding='utf-8') as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+            f.write('<sources>\n')
+            f.write(f'    <sourcecat sourcecatname="{provider_name} ({credit})">\n')
 
             for val in values:
                 desc = cfg['desc_template'].format(name=provider_name, val=val, val_upper=val.upper())
@@ -1110,7 +1176,7 @@ def main():
             'id': 'plutotv',
             'name': args.plutotv_provider_name,
             'fetch_func': lambda mode: fetch_plutotv_data(args.plutotv_source, args.plutotv_id_type, mode, args.debug),
-            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'plutotv', srv_name, PLUTOTV_EPG_LANGS)
+            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'plutotv', srv_name, EPG_CONFIG['plutotv']['regions'])
         })
 
     if "all" in selected_providers or "rakutentv" in selected_providers:
@@ -1126,10 +1192,10 @@ def main():
             'id': 'stvp',
             'name': args.stvp_provider_name,
             'fetch_func': lambda mode: fetch_stvp_data(args.stvp_source, args.stvp_region, mode, args.stvp_ignore_blacklist),
-            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'stvp', srv_name, STVP_REGIONS)
+            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'stvp', srv_name, EPG_CONFIG['stvp']['regions'])
         })
 
-	# Sort services based on the order in --provider or apply reverse if requested
+    # Sort services based on the order in --provider or apply reverse if requested
     if args.reverse_bouquets:
         services.reverse()
     elif provider_setting != "all":
@@ -1219,61 +1285,33 @@ def main():
     playlist_arg = args.playlist_only or args.playlist
 
     if playlist_arg:
-        def get_urls(p_id, regions):
-            """
-            Extract EPG URLs from the central configuration for specific regions.
-
-            Parameters
-            ----------
-            p_id : str
-                The provider identifier (e.g., 'plutotv', 'stvp', 'rakutentv').
-            regions : str or list of str
-                A single region code or a list of codes to process.
-
-            Returns
-            -------
-            list of str
-                A list of unique, formatted EPG URLs.
-            """
-            urls = []
-            cfg = EPG_CONFIG.get(p_id, {})
-            region_list = [regions] if isinstance(regions, str) else regions
-            
-            for r in region_list:
-                if r == 'all':
-                    # Fallback to regions_list for Pluto/STVP or keys for Rakuten
-                    r_set = cfg.get('regions_list', []) or list(cfg.get('regions', {}).keys())
-                    for sub_r in r_set:
-                        urls.extend(get_urls(p_id, sub_r))
-                    continue
-
-                if p_id == 'rakutentv':
-                    u = cfg.get('regions', {}).get(r, {}).get('url')
-                    if u:
-                        urls.append(u)
-                else:
-                    templates = cfg.get('url_template', [])
-                    urls.extend([t.format(val=r) for t in templates])
-            return list(set(urls))
-
         _, playlist_folder, _ = get_system_paths(playlist_arg if os.path.isdir(playlist_arg) else None)
 
         if args.one_playlist:
-            # All-In-One Logic (working)
+            # All-In-One Logic
             full_path = playlist_arg if playlist_arg.endswith('.m3u') else os.path.join(playlist_folder, DEFAULT_M3U_NAME)
             all_epg_urls = []
-            if "plutotv" in selected_providers:
-                all_epg_urls.extend(get_urls('plutotv', 'de')) # or use args
-            if "stvp" in selected_providers:
-                all_epg_urls.extend(get_urls('stvp', args.stvp_region))
-            if "rakutentv" in selected_providers:
-                all_epg_urls.extend(get_urls('rakutentv', args.rakutentv_region))
-            
+
+            is_all = "all" in selected_providers
+
+            if is_all or "plutotv" in selected_providers:
+                pluto_channels = [c for c in all_channels_for_m3u if c.get('provider_id') == 'plutotv']
+                if pluto_channels:
+                    region = pluto_channels[0].get('region')
+                    if region:
+                        all_epg_urls.extend(get_epg_urls('plutotv', region))
+
+            if is_all or "stvp" in selected_providers:
+                all_epg_urls.extend(get_epg_urls('stvp', args.stvp_region))
+
+            if is_all or "rakutentv" in selected_providers:
+                all_epg_urls.extend(get_epg_urls('rakutentv', args.rakutentv_region))
+
             for i, c in enumerate(all_channels_for_m3u, start=1):
                 c['m3u_chno'] = i
             create_m3u_playlist(all_channels_for_m3u, full_path, all_epg_urls)
         else:
-            # Separate Files Logic (Fixed grouping and filtering)
+            # Separate Files Logic
             from collections import OrderedDict
             provider_groups = OrderedDict()
             for c in all_channels_for_m3u:
@@ -1287,16 +1325,17 @@ def main():
                 p_channels = group_data['channels']
                 filename = f"iptv_{p_name}.m3u"
                 full_path = os.path.join(playlist_folder, filename)
-                
+
                 # Fetch URLs based on the stored provider_id
                 p_urls = []
                 if p_id == 'plutotv':
-                    # Use 'de' as default or consider using PLUTOTV_EPG_LANGS
-                    p_urls = get_urls('plutotv', 'de')
+                    region = p_channels[0].get('region') if p_channels else None
+                    if region:
+                        p_urls = get_epg_urls('plutotv', region)
                 elif p_id == 'stvp':
-                    p_urls = get_urls('stvp', args.stvp_region)
+                    p_urls = get_epg_urls('stvp', args.stvp_region)
                 elif p_id == 'rakutentv':
-                    p_urls = get_urls('rakutentv', args.rakutentv_region)
+                    p_urls = get_epg_urls('rakutentv', args.rakutentv_region)
 
                 for i, c in enumerate(p_channels, start=1):
                     c['m3u_chno'] = i
