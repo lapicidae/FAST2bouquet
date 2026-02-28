@@ -54,22 +54,50 @@ RAKUTEN_CLASSIFICATIONS = {
     "me": 259, "mk": 275, "nl": 69, "no": 286, "pl": 277, "pt": 64, "ro": 268,
     "rs": 266, "se": 282, "sk": 273, "uk": 18,
 }
-RAKUTEN_EPG_URLS = {
-    "de": {
-        "url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_DE_epg.xml",
-        "credit": "Fellfresse"
+
+
+# EPG/XMLTV Configuration
+#
+# This dictionary centralizes all provider-specific metadata for EPG generation.
+# Logic for field usage:
+# - credit: Default author/source name if not overridden by region.
+# - type_attr: Template for the <source> tag attributes. 
+#              Supports {channels} and {name} placeholders.
+# - desc_template: Template for the <description> tag in EPGImport.
+#                  Supports {name}, {val} (lowercase), and {val_upper} (uppercase).
+# - url_template: List of URL patterns for providers with consistent naming schemes.
+# - channels_tag: Boolean. If True, a separate <channels> element is created 
+#                 instead of using the attribute in the <source> tag.
+# - regions: Dictionary for providers where URLs or credits differ per region.
+EPG_CONFIG = {
+    'plutotv': {
+        'credit': 'Matt Huisman',
+        'type_attr': 'type="gen_xmltv" nocheck="1" channels="{channels}"',
+        'url_template': [
+            'https://i.mjh.nz/PlutoTV/{val}.xml.gz', 
+            'https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/PlutoTV/{val}.xml.gz'
+        ],
+        'desc_template': '{name} ({val_upper})'
     },
-    "at": {
-        "url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_AT_epg.xml",
-        "credit": "Fellfresse"
+    'rakutentv': {
+        'type_attr': 'name="{name}"',
+        'desc_template': '{name} ({val_upper})',
+        'channels_tag': True,
+        'regions': {
+            "de": {"url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_DE_epg.xml", "credit": "Fellfresse"},
+            "at": {"url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_AT_epg.xml", "credit": "Fellfresse"},
+            "ch": {"url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_CH_epg.xml", "credit": "Fellfresse"},
+            "uk": {"url": "https://raw.githubusercontent.com/dp247/rakuten-uk-epg/master/epg.xml", "credit": "dp247"}
+        }
     },
-    "ch": {
-        "url": "https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_CH_epg.xml",
-        "credit": "Fellfresse"
-    },
-    "uk": {
-        "url": "https://raw.githubusercontent.com/dp247/rakuten-uk-epg/master/epg.xml",
-        "credit": "dp247"
+    'stvp': {
+        'credit': 'Matt Huisman',
+        'type_attr': 'type="gen_xmltv" nocheck="1" channels="{channels}"',
+        'url_template': [
+            'https://i.mjh.nz/SamsungTVPlus/{val}.xml.gz', 
+            'https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/SamsungTVPlus/{val}.xml.gz'
+        ],
+        'desc_template': '{name} ({val_upper})'
     }
 }
 
@@ -973,84 +1001,68 @@ def apply_rounded_corners(img):
         logging.debug(f"Rounding failed in RAM: {e}")
         return img
 
-def create_epg_source(conf_dir, epg_source_file, channels_file, provider_name, service_key, langs):
+def generate_epg_source(conf_dir, source_file, channels_file, provider_id, provider_name, values):
     """
-    Create an XMLTV source file for EPGImport with Matt Huisman credits.
-
-    This function generates a .sources.xml file for the Enigma2 EPGImport plugin,
-    pointing to Matt Huisman's i.mjh.nz repository.
+    Generate an XMLTV source file for EPGImport based on central configuration.
 
     Parameters
     ----------
     conf_dir : str
         Directory path for saving the source file.
-    epg_source_file : str
+    source_file : str
         Filename of the generated source XML.
     channels_file : str
-        Reference filename of the channels XML.
+        Reference filename of the associated channels XML.
+    provider_id : str
+        Identifier of the provider ('plutotv', 'stvp', 'rakutentv') to fetch config.
     provider_name : str
         Display name for the source category.
-    service_key : str
-        Key for the URL path (e.g., 'PlutoTV' or 'SamsungTVPlus').
-    langs : list of str
-        List of available language/region codes for the EPG.
+    values : list of str
+        List of region or language codes to generate sources for.
     """
-    path = os.path.join(conf_dir, epg_source_file)
-    base = f"https://i.mjh.nz/{service_key}"
-    mirror = f"https://github.com/matthuisman/i.mjh.nz/raw/refs/heads/master/{service_key}"
+    cfg = EPG_CONFIG.get(provider_id)
+    if not cfg:
+        logging.error(f"No EPG configuration found for provider ID: {provider_id}")
+        return
+
+    # Determine overall credit dynamically (Rakuten uses region-specific credits)
+    if provider_id == 'rakutentv' and values:
+        credit = cfg.get('regions', {}).get(values[0], {}).get('credit', 'Unknown')
+    else:
+        credit = cfg.get('credit', 'Unknown')
+
+    path = os.path.join(conf_dir, source_file)
     try:
         with open(path, 'w', encoding='utf-8') as f:
             f.write('<?xml version="1.0" encoding="utf-8"?>\n<sources>\n')
-            f.write(f'\t<sourcecat sourcecatname="{provider_name} (Matt Huisman)">\n')
-            for L in langs:
-                f.write(f'\t\t<source type="gen_xmltv" nocheck="1" channels="{channels_file}">\n'
-                        f'\t\t\t<description>{provider_name} ({L})</description>\n'
-                        f'\t\t\t<url>{base}/{L}.xml.gz</url>\n'
-                        f'\t\t\t<url>{mirror}/{L}.xml.gz</url>\n\t\t</source>\n')
+            f.write(f'\t<sourcecat sourcecatname="{provider_name} ({credit})">\n')
+
+            for val in values:
+                desc = cfg['desc_template'].format(name=provider_name, val=val, val_upper=val.upper())
+                attr = cfg['type_attr'].format(name=provider_name, channels=channels_file)
+
+                f.write(f'\t\t<source {attr}>\n')
+                f.write(f'\t\t\t<description>{desc}</description>\n')
+
+                # Build URL(s)
+                if provider_id == 'rakutentv':
+                    reg_url = cfg.get('regions', {}).get(val, {}).get('url')
+                    if reg_url:
+                        f.write(f'\t\t\t<url>{reg_url}</url>\n')
+                else:
+                    for tmpl in cfg['url_template']:
+                        f.write(f'\t\t\t<url>{tmpl.format(val=val)}</url>\n')
+
+                # Apply explicit channels tag if configured (for Rakuten compatibility)
+                if cfg.get('channels_tag'):
+                    f.write(f'\t\t\t<channels>{channels_file}</channels>\n')
+
+                f.write('\t\t</source>\n')
+
             f.write('\t</sourcecat>\n</sources>\n')
-        logging.info(f"EPG source file created: {epg_source_file}")
+        logging.info(f"EPG source file created: {source_file}")
     except Exception as e:
         logging.error(f"EPG Source Error: {e}")
-
-def create_rakuten_epg_source(conf_dir, source_file, channels_file, provider_name, region):
-    """
-    Create the EPG Import source file for Rakuten TV with specific provider credits.
-
-    Dynamically selects the correct EPG URL and attribution (credits) based 
-    on the region from the RAKUTEN_EPG_URLS dictionary.
-
-    Parameters
-    ----------
-    conf_dir : str
-        The directory where the EPG source file will be saved.
-    source_file : str
-        The filename of the resulting .sources.xml file.
-    channels_file : str
-        The filename of the associated .channels.xml file.
-    provider_name : str
-        The display name of the provider.
-    region : str
-        The region code (e.g., 'de', 'uk') to look up URL and credits.
-    """
-    region_data = RAKUTEN_EPG_URLS.get(region, {"url": "", "credit": "Unknown"})
-    epg_url = region_data["url"]
-    credits = region_data["credit"]
-
-    source_path = os.path.join(conf_dir, source_file)
-    try:
-        with open(source_path, 'w', encoding='utf-8') as f:
-            f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-            f.write('<sources>\n')
-            f.write(f'\t<sourcecat sourcecatname="{provider_name} ({credits})">\n')
-            f.write(f'\t\t<source name="{provider_name} EPG">\n')
-            f.write(f'\t\t\t<description>{provider_name} EPG ({region.upper()})</description>\n')
-            f.write(f'\t\t\t<url>{epg_url}</url>\n')
-            f.write(f'\t\t\t<channels>{channels_file}</channels>\n')
-            f.write('\t\t</source>\n')
-            f.write('\t</sourcecat>\n')
-            f.write('</sources>\n')
-    except Exception as e:
-        logging.error(f"Failed to create Rakuten sources file: {e}")
 
 def reload_enigma2():
     """
@@ -1095,7 +1107,7 @@ def main():
             'id': 'plutotv',
             'name': args.plutotv_provider_name,
             'fetch_func': lambda mode: fetch_plutotv_data(args.plutotv_source, args.plutotv_id_type, mode, args.debug),
-            'epg_func': lambda c_file, s_file, srv_name: create_epg_source(conf_dir, s_file, c_file, srv_name, 'PlutoTV', PLUTOTV_EPG_LANGS)
+            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'plutotv', srv_name, PLUTOTV_EPG_LANGS)
         })
 
     if "all" in selected_providers or "rakutentv" in selected_providers:
@@ -1103,7 +1115,7 @@ def main():
             'id': 'rakutentv',
             'name': args.rakutentv_provider_name,
             'fetch_func': lambda mode: fetch_rakutentv_data(args, args.rakutentv_region, mode),
-            'epg_func': lambda c_file, s_file, srv_name: create_rakuten_epg_source(conf_dir, s_file, c_file, srv_name, args.rakutentv_region)
+            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'rakutentv', srv_name, [args.rakutentv_region])
         })
 
     if "all" in selected_providers or "stvp" in selected_providers:
@@ -1111,7 +1123,7 @@ def main():
             'id': 'stvp',
             'name': args.stvp_provider_name,
             'fetch_func': lambda mode: fetch_stvp_data(args.stvp_source, args.stvp_region, mode, args.stvp_ignore_blacklist),
-            'epg_func': lambda c_file, s_file, srv_name: create_epg_source(conf_dir, s_file, c_file, srv_name, 'SamsungTVPlus', STVP_REGIONS)
+            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'stvp', srv_name, STVP_REGIONS)
         })
 
 	# Sort services based on the order in --provider or apply reverse if requested
