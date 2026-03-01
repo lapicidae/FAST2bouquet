@@ -175,8 +175,8 @@ def parse_args():
 
     # Output selection group
     playlist_group = parser.add_argument_group("Playlist options")
-    playlist_group.add_argument("-p", "--playlist", nargs='?', const='.', help="Create M3U playlist(s). Default path: /etc/enigma2 or current directory.")
-    playlist_group.add_argument("-P", "--playlist-only", nargs='?', const='.', help="Create ONLY M3U playlist(s). Stops execution after playlist creation.")
+    playlist_group.add_argument("-p", "--playlist", nargs='?', const='DEFAULT', help="Create M3U playlist(s). Optionally specify an output directory.")
+    playlist_group.add_argument("-P", "--playlist-only", nargs='?', const='DEFAULT', help="Create ONLY M3U playlist(s). Optionally specify an output directory.")
     playlist_group.add_argument("-O", "--one-playlist", action="store_true", help=f"Merge all providers into a single '{DEFAULT_M3U_NAME}'.")
 
     # Picon group
@@ -701,7 +701,7 @@ def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
 
 def create_m3u_playlist(channels, output_file, epg_urls=None):
     """
-    Create an M3U playlist file with optional x-tvg-url header.
+    Create an M3U playlist file with optional x-tvg-url and KODi provider tags.
 
     Parameters
     ----------
@@ -713,6 +713,11 @@ def create_m3u_playlist(channels, output_file, epg_urls=None):
         List of XMLTV URLs to include in the header.
     """
     try:
+        # Ensure the target directory exists
+        target_dir = os.path.dirname(os.path.abspath(output_file))
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+
         with open(output_file, 'w', encoding='utf-8') as f:
             header = "#EXTM3U"
             if epg_urls:
@@ -1298,12 +1303,24 @@ def main():
         srv['epg_func'](c_file, s_file, srv['name'])
 
    # --- Playlist Creation Logic ---
+    # Merge both arguments into a single variable for path evaluation
     playlist_arg = args.playlist_only or args.playlist
 
     if playlist_arg:
-        _, playlist_folder, _ = get_system_paths(playlist_arg if os.path.isdir(playlist_arg) else None)
+        # Determine the target folder and handle directory creation
+        if playlist_arg != 'DEFAULT' and not playlist_arg.endswith('.m3u'):
+            playlist_folder = playlist_arg
+            os.makedirs(playlist_folder, exist_ok=True)
+        else:
+            # Fallback to system default paths if 'DEFAULT' or filename is provided
+            _, playlist_folder, _ = get_system_paths(None)
 
         if args.one_playlist:
+            # If a filename was provided as an argument, use it; otherwise use default
+            if playlist_arg.endswith('.m3u'):
+                full_path = playlist_arg if os.path.isabs(playlist_arg) else os.path.join(playlist_folder, os.path.basename(playlist_arg))
+            else:
+                full_path = os.path.join(playlist_folder, DEFAULT_M3U_NAME)
             # All-In-One Logic
             full_path = playlist_arg if playlist_arg.endswith('.m3u') else os.path.join(playlist_folder, DEFAULT_M3U_NAME)
             all_epg_urls = []
@@ -1327,7 +1344,7 @@ def main():
                 c['m3u_chno'] = i
             create_m3u_playlist(all_channels_for_m3u, full_path, all_epg_urls)
         else:
-            # Separate Files Logic
+            # Separate Files Logic: Create one file per provider in the determined folder
             from collections import OrderedDict
             provider_groups = OrderedDict()
             for c in all_channels_for_m3u:
