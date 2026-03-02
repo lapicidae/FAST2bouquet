@@ -182,6 +182,9 @@ if [ -f "$CONFIG_FILE" ]; then
 	if [ "$QUIET" != "true" ]; then
 		printf "[INFO] External configuration applied from: %s\n" "$CONFIG_FILE"
 	fi
+elif [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
+	printf "ERROR: Config file '%s' is defined but invalid or broken.\n" "$CONFIG_FILE" >&2
+	exit 1
 fi
 
 
