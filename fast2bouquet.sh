@@ -243,25 +243,69 @@ fi
 # ------------------------------------------------------------------------------
 #  AUTO-UPDATE LOGIC
 # ------------------------------------------------------------------------------
-REPO_URL="https://raw.githubusercontent.com/lapicidae/FAST2bouquet/main/$SCRIPT_NAME"
-DISABLE_UPDATE=${DISABLE_UPDATE:-false}
+# Define the repository URL and determine if updates are disabled.
+REPO_URL="https://raw.githubusercontent.com/lapicidae/FAST2bouquet/main/${SCRIPT_NAME}"
+: "${DISABLE_UPDATE:=false}"
 
-if [ -w "$SCRIPT_PATH" ]; then
-	# Calculate local checksum
+# Determine the available download tool once to avoid redundant checks.
+# Supported tools: curl, wget (BusyBox compatible).
+if command -v curl >/dev/null 2>&1; then
+	FETCH_TOOL="curl"
+elif command -v wget >/dev/null 2>&1; then
+	FETCH_TOOL="wget"
+else
+	FETCH_TOOL=""
+fi
+
+#######################################
+# Downloads content from a URL to stdout or a file.
+# Globals:
+#   FETCH_TOOL
+# Arguments:
+#   url: String URL to fetch.
+#   out: Optional file path to save the content.
+# Returns:
+#   0 if the download was successful, 1 otherwise.
+#######################################
+fetch() {
+	url=$1
+	out=$2
+
+	if [ -z "$FETCH_TOOL" ]; then
+		return 1
+	fi
+
+	if [ "$FETCH_TOOL" = "curl" ]; then
+		if [ -n "$out" ]; then
+			curl -sL -o "$out" "$url"
+		else
+			curl -sL "$url"
+		fi
+	else
+		if [ -n "$out" ]; then
+			wget -qO "$out" "$url"
+		else
+			wget -qO- "$url"
+		fi
+	fi
+}
+
+if [ -n "$FETCH_TOOL" ] && [ -w "$SCRIPT_PATH" ]; then
+	# Calculate local checksum.
 	LOCAL_CK=$(cksum "$SCRIPT_PATH" | cut -d' ' -f1)
-	REMOTE_CK=$(curl -sL "$REPO_URL" | cksum | cut -d' ' -f1)
 
-	# Only continue if we actually got a valid remote checksum
-	if [ -n "$REMOTE_CK" ]; then
-		if [ "$LOCAL_CK" != "$REMOTE_CK" ]; then
-			if [ "$DISABLE_UPDATE" = "true" ]; then
-				printf "HINT: New version available at GitHub.\n"
-			else
-				printf "New version found. Updating %s...\n" "$SCRIPT_PATH"
-				# Final write only happens here, once.
-				if ! curl -s -L -o "$SCRIPT_PATH" "$REPO_URL"; then
-					printf "ERROR: Download failed."
-				fi
+	# Calculate remote checksum.
+	REMOTE_CK=$(fetch "$REPO_URL" | cksum | cut -d' ' -f1)
+
+	# Only continue if we actually got a valid remote checksum.
+	if [ -n "$REMOTE_CK" ] && [ "$LOCAL_CK" != "$REMOTE_CK" ]; then
+		if [ "$DISABLE_UPDATE" = "true" ]; then
+			printf "HINT: New version available at GitHub.\n"
+		else
+			printf "New version found. Updating %s...\n" "$SCRIPT_PATH"
+			# Final write only happens here, once.
+			if ! fetch "$REPO_URL" "$SCRIPT_PATH"; then
+				printf "ERROR: Download failed.\n"
 			fi
 		fi
 	fi
