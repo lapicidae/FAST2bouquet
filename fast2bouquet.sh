@@ -110,6 +110,24 @@
 # PICON_FOLDER='/media/usb/picon'
 
 # ------------------------------------------------------------------------------
+#  PLAYLIST SETTINGS
+# ------------------------------------------------------------------------------
+# Create M3U playlist(s).
+# Options: true, false, or a custom directory path (e.g., /tmp/playlists)
+# Default: false
+# PLAYLIST='true'
+
+# Skip bouquet generation and only create M3U playlist(s).
+# Options: true, false, or a custom directory path
+# Default: false
+# PLAYLIST_ONLY='false'
+
+# Combine all selected providers into a single M3U playlist (iptv_FAST.m3u).
+# Options: true, false
+# Default: false
+# ONE_PLAYLIST='true'
+
+# ------------------------------------------------------------------------------
 #  GLOBAL OPTIONS
 # ------------------------------------------------------------------------------
 # Service type: 4097 (Standard) or 5002 (exteplayer3/ffmpeg).
@@ -146,6 +164,26 @@
 # FLAGS='--flag1 ARG'       # Flag with argument
 # FLAGS="$FLAGS --flag2"    # Bol flag
 
+# ------------------------------------------------------------------------------
+#  EXTERNAL CONFIGURATION LOADER
+# ------------------------------------------------------------------------------
+# Path to the configuration file.
+#
+# WARNING:
+#  Any variables defined in this external file will OVERWRITE the default
+#  settings specified above. The external config takes precedence.
+# ------------------------------------------------------------------------------
+: "${CONFIG_FILE:="/etc/fast2bouquet.cfg"}"
+if [ -f "$CONFIG_FILE" ]; then
+	# shellcheck source=/dev/null
+	. "$CONFIG_FILE"
+
+	# Simple check if QUIET is not true to provide feedback
+	if [ "$QUIET" != "true" ]; then
+		printf "[INFO] External configuration applied from: %s\n" "$CONFIG_FILE"
+	fi
+fi
+
 
 
 # ==============================================================================
@@ -156,8 +194,10 @@
 #  SYSTEM & PATH DISCOVERY
 # ------------------------------------------------------------------------------
 PYTHON_BIN=$(command -v python3)
-SCRIPT_NAME="fast2bouquet.py"
-SCRIPT_PATH="/usr/script/$SCRIPT_NAME"
+
+# Set default values if not previously defined
+: "${SCRIPT_NAME:="fast2bouquet.py"}"
+: "${SCRIPT_PATH:="/usr/script/$SCRIPT_NAME"}"
 
 # Fallback: Use the directory of this wrapper as the script path.
 if [ ! -f "$SCRIPT_PATH" ]; then
@@ -176,6 +216,24 @@ fi
 if [ ! -f "$SCRIPT_PATH" ]; then
 	printf "ERROR: Python script not found at: %s\n" "$SCRIPT_PATH" >&2
 	exit 1
+fi
+
+
+# ------------------------------------------------------------------------------
+#  ARGUMENT PASS-THROUGH
+# ------------------------------------------------------------------------------
+# If arguments are provided, skip internal logic and pass them directly.
+if [ "$#" -gt 0 ]; then
+	if [ ! -f "$SCRIPT_PATH" ]; then
+		SCRIPT_PATH="$(dirname "$0")/$SCRIPT_NAME"
+	fi
+
+	if [ -z "$PYTHON_BIN" ] || [ ! -f "$SCRIPT_PATH" ]; then
+		printf "ERROR: Environment check failed for manual pass-through.\n" >&2
+		exit 1
+	fi
+
+	exec "$PYTHON_BIN" "$SCRIPT_PATH" "$@"
 fi
 
 
@@ -236,10 +294,25 @@ set -- "$PYTHON_BIN" "$SCRIPT_PATH"
 [ "$NO_PARALLEL" = "true" ]             && set -- "$@" --no-parallel
 [ "$NOT_RELOAD" = "true" ]              && set -- "$@" --not-reload
 [ "$ONE_BOUQUET" = "true" ]             && set -- "$@" --one-bouquet
+[ "$ONE_PLAYLIST" = "true" ]            && set -- "$@" --one-playlist
 [ "$PICON_NO_RESIZE" = "true" ]         && set -- "$@" --picon-no-resize
 [ "$QUIET" = "true" ]                   && set -- "$@" --quiet
 [ "$REVERSE_BOUQUETS" = "true" ]        && set -- "$@" --reverse-bouquets
 [ "$STVP_IGNORE_BLACKLIST" = "true" ]   && set -- "$@" --stvp-ignore-blacklist
+
+# Handle standard playlist generation
+if [ "$PLAYLIST" = "true" ]; then
+	set -- "$@" --playlist
+elif [ -n "$PLAYLIST" ]; then
+	set -- "$@" --playlist "$PLAYLIST"
+fi
+
+# Handle playlist-only mode
+if [ "$PLAYLIST_ONLY" = "true" ]; then
+	set -- "$@" --playlist-only
+elif [ -n "$PLAYLIST_ONLY" ]; then
+	set -- "$@" --playlist-only "$PLAYLIST_ONLY"
+fi
 
 # Special handling for Picons (Download vs Overwrite)
 if [ "$DOWNLOAD_PICONS" = "overwrite" ]; then
