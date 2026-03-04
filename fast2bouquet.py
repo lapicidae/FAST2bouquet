@@ -217,6 +217,41 @@ def parse_args():
 
     return parser.parse_args()
 
+# --- Global Regex & Helpers ---
+NORMALIZE_RE = re.compile(r"[^\w]+")
+
+def parse_csv_option(value):
+    """
+    Parse a comma-separated string into a list of lowercase strings.
+
+    Parameters
+    ----------
+    value : str
+        The comma-separated command line argument string.
+
+    Returns
+    -------
+    list of str
+        A list containing the parsed, lowercase strings.
+    """
+    return [x.strip() for x in value.lower().split(',')]
+
+def get_unique_list(seq):
+    """
+    Return a list of unique elements from a sequence, preserving order.
+
+    Parameters
+    ----------
+    seq : iterable
+        The sequence to process.
+
+    Returns
+    -------
+    list
+        A list of unique items from the sequence.
+    """
+    return list(dict.fromkeys(seq))
+
 def normalize_name(name):
     """
     Normalize a string for use in filenames or IDs using regex.
@@ -231,7 +266,7 @@ def normalize_name(name):
     str
         The cleaned string with non-word characters replaced by dashes.
     """
-    name = re.sub(r"[^\w]+", "-", name)
+    name = NORMALIZE_RE.sub("-", name)
     return name.strip("-")
 
 def get_stable_sid(unique_id):
@@ -641,7 +676,8 @@ def fetch_rakutentv_data(args, region, picon_color):
     ch_data = _get("/live_channels", ch_query)
 
     processed_channels = []
-    skipped_count = [0] 
+    processed_channels = []
+    skipped_count = 0 
     ch_list = ch_data.get("data", [])
 
     if not ch_list:
@@ -650,6 +686,7 @@ def fetch_rakutentv_data(args, region, picon_color):
     logging.info("Rakuten TV: Found %d channels for region '%s'. Fetching stream URLs...", len(ch_list), region)
 
     def process_single_rakuten_channel(ch):
+        nonlocal skipped_count
         ch_id = ch.get("id")
         langs = ch.get("labels", {}).get("languages", [])
         audio_lang = langs[0].get("id") if langs else "ENG"
@@ -670,7 +707,7 @@ def fetch_rakutentv_data(args, region, picon_color):
         stream_url = s_infos[0].get("url", "") if s_infos else ""
 
         if not stream_url:
-            skipped_count[0] += 1
+            skipped_count += 1
             return None
 
         if '.m3u8' in stream_url:
@@ -698,8 +735,8 @@ def fetch_rakutentv_data(args, region, picon_color):
             if res:
                 processed_channels.append(res)
 
-    if skipped_count[0] > 0:
-        logging.info("Rakuten TV: %d channels skipped (Geo-blocked/No stream/IP blocked).", skipped_count[0])
+    if skipped_count > 0:
+        logging.info("Rakuten TV: %d channels skipped (Geo-blocked/No stream/IP blocked).", skipped_count)
 
     return processed_channels
 
@@ -747,8 +784,6 @@ def fetch_stvp_data(api_url, region, picon_color, ignore_blacklist=False):
             if not ignore_blacklist and cid in STVP_BLACKLIST:
                 logging.debug(f"Skipping blacklisted STVP channel: {cid}")
                 continue
-
-            api_ua = data.get("headers", {}).get("user-agent", default_ua) #
 
             channels.append({
                 "sid": get_stable_sid(cid),
@@ -901,11 +936,10 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
         hex_sid_bouquet = f"{c['sid']:04X}"  # e.g.: 009B
         hex_sid_picon = f"{c['sid']:X}"      # e.g.: 9B
 
-        url_clean = c['url'].replace(':', '%3a')
-
-        ua_val = c.get('user_agent') #
-        ua_suffix = f"#User-Agent={ua_val}" if ua_val else "" #
-        url_clean = (c['url'] + ua_suffix).replace(':', '%3a') #
+        base_url = c['url']
+        if c.get('user_agent'):
+            base_url = f"{base_url}#User-Agent={c['user_agent']}"
+        url_clean = base_url.replace(':', '%3a')
 
         picon_name = f"{service_type}_0_1_{hex_sid_picon}_{tid}_0_0_0_0_0".upper()
 
@@ -942,11 +976,19 @@ def process_channels(channels, provider_prefix, tid, service_type, bouquet_dir, 
     # Generate XML channel map sorted alphabetically for EPG mapping
     xml_sort_list = sorted(channels, key=lambda x: x['name'].lower())
     xml_entries = []
+
+    # Optical correction: Remove “tv” at the end, if present
+    domain_name = provider_display.lower()
+    if domain_name.endswith("tv"):
+        domain_name = domain_name[:-2]
+
+    dummy_host = f"http%3a//{domain_name}.tv"
+
     for c in xml_sort_list:
         # Calculate the 4-digit hex SID for the current channel to prevent duplicates
         h_sid = f"{c['sid']:04X}"
         xml_entries.append(
-            f'\t<channel id="{c["channel_id"]}">{service_type}:0:1:{h_sid}:{tid}:0:0:0:0:0:http%3a//pluto.tv</channel> \n'
+            f'\t<channel id="{c["channel_id"]}">{service_type}:0:1:{h_sid}:{tid}:0:0:0:0:0:{dummy_host}</channel>\n'
         )
 
     with open(os.path.join(conf_dir, channels_file), 'w', encoding='utf-8') as f:
@@ -1215,6 +1257,10 @@ def generate_epg_source(conf_dir, source_file, channels_file, provider_id, provi
                 if cfg.get('channels_tag'):
                     f.write(f'\t\t\t<channels>{channels_file}</channels>\n')
 
+                urls = get_epg_urls(provider_id, val)
+                for u in urls:
+                    f.write(f'\t\t\t<url>{u}</url>\n')
+
                 f.write('\t\t</source>\n')
 
             f.write('\t</sourcecat>\n</sources>\n')
@@ -1320,9 +1366,9 @@ def main():
     # Collective list for all channels
     all_channels_for_m3u = []
 
-    # Parse requested providers from string
+    # Parse requested providers from string using helper
     provider_setting = args.provider.lower()
-    selected_providers = [x.strip() for x in provider_setting.split(',')]
+    selected_providers = parse_csv_option(args.provider)
 
     # Validation of providers
     if "all" not in selected_providers:
@@ -1335,7 +1381,7 @@ def main():
     # Initialize requested services
     services = []
 
-    # Now start the actual processing
+    # Pluto TV
     if "all" in selected_providers or "plutotv" in selected_providers:
         if args.plutotv_legacy:
             def pluto_fetch(mode):
@@ -1369,20 +1415,38 @@ def main():
             'epg_func': pluto_epg
         })
 
+    # Rakuten TV
     if "all" in selected_providers or "rakutentv" in selected_providers:
+        def rakuten_fetch(mode):
+            """Fetch Rakuten TV data."""
+            return fetch_rakutentv_data(args, args.rakutentv_region, mode)
+
+        def rakuten_epg(c_file, s_file, srv_name):
+            """Generate Rakuten TV EPG source."""
+            return generate_epg_source(conf_dir, s_file, c_file, 'rakutentv', srv_name, [args.rakutentv_region])
+
         services.append({
             'id': 'rakutentv',
             'name': args.rakutentv_provider_name,
-            'fetch_func': lambda mode: fetch_rakutentv_data(args, args.rakutentv_region, mode),
-            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'rakutentv', srv_name, [args.rakutentv_region])
+            'fetch_func': rakuten_fetch,
+            'epg_func': rakuten_epg
         })
 
+    # Samsung TV Plus
     if "all" in selected_providers or "stvp" in selected_providers:
+        def stvp_fetch(mode):
+            """Fetch Samsung TV Plus data."""
+            return fetch_stvp_data(args.stvp_source, args.stvp_region, mode, args.stvp_ignore_blacklist)
+
+        def stvp_epg(c_file, s_file, srv_name):
+            """Generate STVP EPG source."""
+            return generate_epg_source(conf_dir, s_file, c_file, 'stvp', srv_name, PROVIDER_CONFIG['stvp']['regions'])
+
         services.append({
             'id': 'stvp',
             'name': args.stvp_provider_name,
-            'fetch_func': lambda mode: fetch_stvp_data(args.stvp_source, args.stvp_region, mode, args.stvp_ignore_blacklist),
-            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'stvp', srv_name, PROVIDER_CONFIG['stvp']['regions'])
+            'fetch_func': stvp_fetch,
+            'epg_func': stvp_epg
         })
 
     # Sort services based on the order in --provider or apply reverse if requested
@@ -1405,8 +1469,7 @@ def main():
 
         # --- Picon Color Logic ---
         # Parse the comma-separated list to decide if this provider gets colorful picons.
-        colorful_setting = args.picon_colorful.lower()
-        colorful_list = [x.strip() for x in colorful_setting.split(',')]
+        colorful_list = parse_csv_option(args.picon_colorful)
         is_colorful = "all" in colorful_list or srv['id'] in colorful_list
         picon_mode = "color" if is_colorful else "solid"
 
@@ -1454,8 +1517,7 @@ def main():
 
         # --- Picon Post-Processing Logic ---
         # Determine if rounded corners should be applied for this specific provider.
-        pp_setting = args.picon_post_processing.lower()
-        pp_list = [x.strip() for x in pp_setting.split(',')]
+        pp_list = parse_csv_option(args.picon_post_processing)
         post_process_active = "all" in pp_list or srv['id'] in pp_list
 
         if do_download:
@@ -1494,20 +1556,20 @@ def main():
             full_path = playlist_arg if playlist_arg.endswith('.m3u') else os.path.join(playlist_folder, DEFAULT_M3U_NAME)
             all_epg_urls = []
 
-            is_all = "all" in selected_providers
+            for srv in services:
+                if srv['id'] == 'plutotv':
+                    pluto_channels = [c for c in all_channels_for_m3u if c.get('provider_id') == 'plutotv']
+                    if pluto_channels:
+                        region = pluto_channels[0].get('region')
+                        if region:
+                            all_epg_urls.extend(get_epg_urls('plutotv', region))
+                else:
+                    reg_attr = f"{srv['id']}_region"
+                    reg = getattr(args, reg_attr, 'de')
+                    all_epg_urls.extend(get_epg_urls(srv['id'], reg))
 
-            if is_all or "plutotv" in selected_providers:
-                pluto_channels = [c for c in all_channels_for_m3u if c.get('provider_id') == 'plutotv']
-                if pluto_channels:
-                    region = pluto_channels[0].get('region')
-                    if region:
-                        all_epg_urls.extend(get_epg_urls('plutotv', region))
-
-            if is_all or "stvp" in selected_providers:
-                all_epg_urls.extend(get_epg_urls('stvp', args.stvp_region))
-
-            if is_all or "rakutentv" in selected_providers:
-                all_epg_urls.extend(get_epg_urls('rakutentv', args.rakutentv_region))
+            if all_epg_urls:
+                all_epg_urls = get_unique_list(all_epg_urls)
 
             for i, c in enumerate(all_channels_for_m3u, start=1):
                 c['m3u_chno'] = i
