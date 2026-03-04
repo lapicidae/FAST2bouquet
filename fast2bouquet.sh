@@ -21,6 +21,11 @@
 # ------------------------------------------------------------------------------
 #  PLUTO TV
 # ------------------------------------------------------------------------------
+# Regional subset.
+# Options: all,ar,br,ca,cl,de,dk,es,fr,gb,it,mx,no,se,us
+# Default: de
+# PLUTOTV_REGION='all'
+
 # Display name and file prefix.
 # Default: PlutoTV
 # PLUTOTV_PROVIDER_NAME='PlutoTV-de'
@@ -29,13 +34,21 @@
 # Default: None
 # PLUTOTV_TID='029A'
 
-# Pluto TV API entry point.
+# Source URL for the Pluto TV API
 # Default: https://boot.pluto.tv
-# PLUTOTV_SOURCE='https://boot.pluto.tv'
+# PLUTOTV_SOURCE='https://i.mjh.nz/PlutoTV/.channels.json'
 
 # Mapping type for EPG: 'id' (UUID) or 'slug' (human readable).
 # Default: id
 # PLUTOTV_ID_TYPE='slug'
+
+# Use the default Pluto TV API
+# Default: false
+# PLUTOTV_LEGACY='true'
+
+# Source URL for the legacy Pluto TV API
+# Default: https://boot.pluto.tv
+# PLUTOTV_SOURCE_LEGACY='https://boot.pluto.tv'
 
 # ------------------------------------------------------------------------------
 #  RAKUTEN TV (Note: Strictly geo-blocked!)
@@ -319,22 +332,24 @@ set -- "$PYTHON_BIN" "$SCRIPT_PATH"
 
 # String arguments
 [ -n "$PROVIDER" ]                  && set -- "$@" --provider "$PROVIDER"
-[ -n "$PLUTOTV_PROVIDER_NAME" ]     && set -- "$@" --plutotv-provider-name "$PLUTOTV_PROVIDER_NAME"
-[ -n "$PLUTOTV_TID" ]               && set -- "$@" --plutotv-tid "$PLUTOTV_TID"
-[ -n "$PLUTOTV_SOURCE" ]            && set -- "$@" --plutotv-source "$PLUTOTV_SOURCE"
 [ -n "$PLUTOTV_ID_TYPE" ]           && set -- "$@" --plutotv-id-type "$PLUTOTV_ID_TYPE"
-[ -n "$RAKUTENTV_REGION" ]          && set -- "$@" --rakutentv-region "$RAKUTENTV_REGION"
+[ -n "$PLUTOTV_PROVIDER_NAME" ]     && set -- "$@" --plutotv-provider-name "$PLUTOTV_PROVIDER_NAME"
+[ -n "$PLUTOTV_REGION" ]            && set -- "$@" --plutotv-region "$PLUTOTV_REGION"
+[ -n "$PLUTOTV_SOURCE" ]            && set -- "$@" --plutotv-source "$PLUTOTV_SOURCE"
+[ -n "$PLUTOTV_SOURCE_LEGACY" ]     && set -- "$@" --plutotv-source-legacy "$PLUTOTV_SOURCE"
+[ -n "$PLUTOTV_TID" ]               && set -- "$@" --plutotv-tid "$PLUTOTV_TID"
 [ -n "$RAKUTENTV_PROVIDER_NAME" ]   && set -- "$@" --rakutentv-provider-name "$RAKUTENTV_PROVIDER_NAME"
-[ -n "$RAKUTENTV_TID" ]             && set -- "$@" --rakutentv-tid  "$RAKUTENTV_TID"
+[ -n "$RAKUTENTV_REGION" ]          && set -- "$@" --rakutentv-region "$RAKUTENTV_REGION"
 [ -n "$RAKUTENTV_SOURCE" ]          && set -- "$@" --rakutentv-source "$RAKUTENTV_SOURCE"
-[ -n "$STVP_REGION" ]               && set -- "$@" --stvp-region "$STVP_REGION"
+[ -n "$RAKUTENTV_TID" ]             && set -- "$@" --rakutentv-tid  "$RAKUTENTV_TID"
 [ -n "$STVP_PROVIDER_NAME" ]        && set -- "$@" --stvp-provider-name "$STVP_PROVIDER_NAME"
-[ -n "$STVP_TID" ]                  && set -- "$@" --stvp-tid "$STVP_TID"
+[ -n "$STVP_REGION" ]               && set -- "$@" --stvp-region "$STVP_REGION"
 [ -n "$STVP_SOURCE" ]               && set -- "$@" --stvp-source "$STVP_SOURCE"
+[ -n "$STVP_TID" ]                  && set -- "$@" --stvp-tid "$STVP_TID"
 [ -n "$PICON_COLORFUL" ]            && set -- "$@" --picon-colorful "$PICON_COLORFUL"
-[ -n "$PICON_SIZE" ]                && set -- "$@" --picon-size "$PICON_SIZE"
-[ -n "$PICON_POST_PROCESSING" ]     && set -- "$@" --picon-post-processing "$PICON_POST_PROCESSING"
 [ -n "$PICON_FOLDER" ]              && set -- "$@" --picon-folder "$PICON_FOLDER"
+[ -n "$PICON_POST_PROCESSING" ]     && set -- "$@" --picon-post-processing "$PICON_POST_PROCESSING"
+[ -n "$PICON_SIZE" ]                && set -- "$@" --picon-size "$PICON_SIZE"
 [ -n "$SERVICE_TYPE" ]              && set -- "$@" --service-type "$SERVICE_TYPE"
 
 # Boolean Flags (Translate 'true' variables to python flags)
@@ -343,6 +358,7 @@ set -- "$PYTHON_BIN" "$SCRIPT_PATH"
 [ "$ONE_BOUQUET" = "true" ]             && set -- "$@" --one-bouquet
 [ "$ONE_PLAYLIST" = "true" ]            && set -- "$@" --one-playlist
 [ "$PICON_NO_RESIZE" = "true" ]         && set -- "$@" --picon-no-resize
+[ "$PLUTOTV_LEGACY" = "true" ]          && set -- "$@" --plutotv-legacy
 [ "$QUIET" = "true" ]                   && set -- "$@" --quiet
 [ "$REVERSE_BOUQUETS" = "true" ]        && set -- "$@" --reverse-bouquets
 [ "$STVP_IGNORE_BLACKLIST" = "true" ]   && set -- "$@" --stvp-ignore-blacklist

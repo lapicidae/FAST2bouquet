@@ -59,6 +59,7 @@ RAKUTEN_CLASSIFICATIONS = {
 #
 # Logic for field usage:
 # - credit:        Default author/source name for the EPG (used in .sources.xml).
+# - credit_url:    Global (donation) link for the stream/data/code provider.
 # - logo:          URL to the provider's official logo (used for KODi provider-logo tag).
 # - type_attr:     Template for the <source> tag attributes in EPGImport sources.
 #                  Supports {channels} and {name} placeholders.
@@ -69,11 +70,13 @@ RAKUTEN_CLASSIFICATIONS = {
 # - channels_tag:  Boolean. If True, a separate <channels> element is created 
 #                  instead of using the channels attribute in the <source> tag.
 # - regions:       Dictionary for region-specific overrides:
-#                  - url:    Direct XMLTV URL (overrides url_template if present).
-#                  - credit: Region-specific author (overrides global credit).
+#                    - url:              Direct XMLTV URL (overrides url_template if present).
+#                    - xmltv_credit:     The credit for the EPG data provider.
+#                    - xmltv_credit_url: The link for the EPG provider.
 PROVIDER_CONFIG = {
     'plutotv': {
         'credit': 'Matt Huisman',
+        'credit_url': 'https://i.mjh.nz/~~SUPPORT_ME~~',
         'logo': 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/Pluto_TV_logo_2024.svg/604px-Pluto_TV_logo_2024.svg.png',
         'type_attr': 'type="gen_xmltv" nocheck="1" channels="{channels}"',
         'url_template': [
@@ -88,6 +91,8 @@ PROVIDER_CONFIG = {
         }
     },
     'rakutentv': {
+        'credit': 'pandvan',
+        'credit_url': 'https://github.com/pandvan/rakuten-m3u-generator',
         'logo': 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Rakuten_TV_logo.svg/800px-Rakuten_TV_logo.svg.png',
         'type_attr': 'name="{name}"',
         'desc_template': '{name} ({val_upper})',
@@ -95,24 +100,29 @@ PROVIDER_CONFIG = {
         'regions': {
             'de': {
                 'url': 'https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_DE_epg.xml',
-                'credit': 'Fellfresse'
+                'xmltv_credit': 'Fellfresse',
+                'xmltv_credit_url': 'https://github.com/Fellfresse/rakuten-DACH-epg'
             },
             'at': {
                 'url': 'https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_AT_epg.xml',
-                'credit': 'Fellfresse'
+                'xmltv_credit': 'Fellfresse',
+                'xmltv_credit_url': 'https://github.com/Fellfresse/rakuten-DACH-epg'
             },
             'ch': {
                 'url': 'https://raw.githubusercontent.com/Fellfresse/Rakuten-DACH-EPG/master/Rakuten_CH_epg.xml',
-                'credit': 'Fellfresse'
+                'xmltv_credit': 'Fellfresse',
+                'xmltv_credit_url': 'https://github.com/Fellfresse/rakuten-DACH-epg'
             },
             'uk': {
                 'url': 'https://raw.githubusercontent.com/dp247/rakuten-uk-epg/master/epg.xml',
-                'credit': 'dp247'
+                'xmltv_credit': 'dp247',
+                'xmltv_credit_url': 'https://github.com/dp247/rakuten-uk-epg'
             }
         }
     },
     'stvp': {
         'credit': 'Matt Huisman',
+        'credit_url': 'https://i.mjh.nz/~~SUPPORT_ME~~',
         'logo': 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/bd/Samsung_TV_Plus_logo.svg/406px-Samsung_TV_Plus_logo.svg.png',
         'type_attr': 'type="gen_xmltv" nocheck="1" channels="{channels}"',
         'url_template': [
@@ -148,10 +158,13 @@ def parse_args():
 
     # PlutoTV group
     plutotv_group = parser.add_argument_group("Pluto TV")
+    plutotv_group.add_argument("--plutotv-region", choices=list(PROVIDER_CONFIG['plutotv']['regions'].keys()), default="de", help="Regional subset for Pluto TV (not used in legacy mode)")
     plutotv_group.add_argument("--plutotv-provider-name", default="PlutoTV", help="Display name and file prefix for Pluto TV")
     plutotv_group.add_argument("--plutotv-tid", help="Manual hex transponder ID (auto-generated from provider name if omitted)")
-    plutotv_group.add_argument("--plutotv-source", default="https://boot.pluto.tv", help="Pluto TV API entry point")
+    plutotv_group.add_argument("--plutotv-source", default="https://i.mjh.nz/PlutoTV/.channels.json", help="Source URL for the Pluto TV API")
     plutotv_group.add_argument("--plutotv-id-type", choices=["id", "slug"], default="id", help="Mapping type for EPG: 'id' (UUID) or 'slug' (human readable)")
+    plutotv_group.add_argument("--plutotv-legacy", action="store_true", help="Use the default Pluto TV API")
+    plutotv_group.add_argument("--plutotv-source-legacy", default="https://boot.pluto.tv", help="Source URL for the legacy Pluto TV API")
 
     # Rakuten TV group
     rakuten_group = parser.add_argument_group("Rakuten TV")
@@ -318,9 +331,59 @@ def clean_old_files(bouquet_dir, conf_dir, prefix, channels_file):
     if os.path.exists(c_path):
         os.remove(c_path)
 
-def fetch_plutotv_data(api_url, id_type, picon_color, debug=False):
+def fetch_plutotv_data(api_url, region, debug=False):
     """
-    Fetch and parse channel data from the Pluto TV JSON APIs.
+    Fetch Pluto TV data using the new JSON API from i.mjh.nz.
+
+    Parameters
+    ----------
+    api_url : str
+        The URL to the channels.json file.
+    region : str
+        The region code (e.g., 'de', 'us') to fetch.
+    debug : bool, optional
+        If True, saves the raw JSON to a file.
+
+    Returns
+    -------
+    list of dict
+        A list of processed channel objects.
+    """
+    try:
+        req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode('utf-8'))
+
+        user_agent = data.get("headers", {}).get("user-agent", "okhttp/4.9.0")
+        region_data = data.get("regions", {}).get(region, {})
+        channels_raw = region_data.get("channels", {})
+
+        channels = []
+        for cid, cdata in channels_raw.items():
+            # Ensure we get a valid logo URL string
+            logo_url = cdata.get("logo")
+            if not isinstance(logo_url, str) or not logo_url.startswith("http"):
+                logo_url = None
+
+            channels.append({
+                "sid": get_stable_sid(cid),
+                "ch_number": cdata.get("chno", 9999),
+                "name": cdata.get("name", "Unknown").strip(),
+                "category": cdata.get("group", "Uncategorized").strip(),
+                "channel_id": cid,
+                "logo_url": logo_url,  # This must be a full URL
+                "url": f"https://jmp2.uk/plu-{cid}.m3u8",
+                "user_agent": user_agent,
+                "region": region
+            })
+        return channels
+    except Exception as e:
+        logging.error(f"Pluto TV (New API) error: {e}")
+        return []
+
+def fetch_plutotv_data_legacy(api_url, id_type, picon_color, debug=False):
+    """
+    Fetch data using the original Pluto TV boot sequence (Legacy).
 
     Parameters
     ----------
@@ -1109,14 +1172,20 @@ def generate_epg_source(conf_dir, source_file, channels_file, provider_id, provi
     # Prepare region mapping for lookup
     region_avail = cfg.get('regions', {})
 
-    # Identify the first valid region to extract a credit/author
+    # Identify the first valid region to extract a credit/author for the category name
     val_list = values if isinstance(values, list) else list(values.keys())
     first_val = next((v for v in val_list if v != 'all'), None)
 
-    # PRIORITY: 1. Region-specific credit -> 2. Global provider credit -> 3. Unknown
+    # PRIORITY: 1. Region xmltv_credit -> 2. Global provider credit -> 3. Unknown
     credit = 'Unknown'
     if first_val and first_val in region_avail:
-        credit = region_avail[first_val].get('credit') or cfg.get('credit', 'Unknown')
+        reg_cfg = region_avail[first_val]
+        if isinstance(reg_cfg, dict):
+            # Use xmltv_credit if available, otherwise fallback to provider credit
+            credit = reg_cfg.get('xmltv_credit') or cfg.get('credit', 'Unknown')
+        else:
+            # Fallback for simple string-based regions (like PlutoTV)
+            credit = cfg.get('credit', 'Unknown')
     else:
         credit = cfg.get('credit', 'Unknown')
 
@@ -1125,7 +1194,7 @@ def generate_epg_source(conf_dir, source_file, channels_file, provider_id, provi
         with open(source_path, 'w', encoding='utf-8') as f:
             f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
             f.write('<sources>\n')
-            f.write(f'    <sourcecat sourcecatname="{provider_name} ({credit})">\n')
+            f.write(f'\t<sourcecat sourcecatname="{provider_name} ({credit})">\n')
 
             for val in values:
                 desc = cfg['desc_template'].format(name=provider_name, val=val, val_upper=val.upper())
@@ -1134,16 +1203,15 @@ def generate_epg_source(conf_dir, source_file, channels_file, provider_id, provi
                 f.write(f'\t\t<source {attr}>\n')
                 f.write(f'\t\t\t<description>{desc}</description>\n')
 
-                # Build URL(s)
                 if provider_id == 'rakutentv':
-                    reg_url = cfg.get('regions', {}).get(val, {}).get('url')
+                    reg_data = cfg.get('regions', {}).get(val, {})
+                    reg_url = reg_data.get('url') if isinstance(reg_data, dict) else None
                     if reg_url:
                         f.write(f'\t\t\t<url>{reg_url}</url>\n')
                 else:
                     for tmpl in cfg['url_template']:
                         f.write(f'\t\t\t<url>{tmpl.format(val=val)}</url>\n')
 
-                # Apply explicit channels tag if configured (for Rakuten compatibility)
                 if cfg.get('channels_tag'):
                     f.write(f'\t\t\t<channels>{channels_file}</channels>\n')
 
@@ -1153,6 +1221,81 @@ def generate_epg_source(conf_dir, source_file, channels_file, provider_id, provi
         logging.info(f"EPG source file created: {source_file}")
     except Exception as e:
         logging.error(f"EPG Source Error: {e}")
+
+def display_credits(services, args):
+    """
+    Display credits and donation links for providers and XMLTV sources.
+
+    Parameters
+    ----------
+    services : list of dict
+        The list of processed service objects.
+    args : argparse.Namespace
+        The parsed command line arguments.
+    """
+    import sys
+    import os
+
+    provider_credits = {}
+    xmltv_credits = {}
+
+    for srv in services:
+        p_id = srv['id']
+        if p_id not in PROVIDER_CONFIG:
+            continue
+            
+        cfg = PROVIDER_CONFIG[p_id]
+        
+        # 1. Provider Credits
+        p_credit_url = cfg.get('credit_url', 'no_url')
+        if p_credit_url not in provider_credits:
+            provider_credits[p_credit_url] = {'names': [], 'credit': cfg.get('credit', 'Unknown')}
+        if p_id.upper() not in provider_credits[p_credit_url]['names']:
+            provider_credits[p_credit_url]['names'].append(p_id.upper())
+
+        # 2. XMLTV Credits
+        region_key = f"{p_id}_region"
+        selected_region = getattr(args, region_key, None)
+        
+        if selected_region:
+            reg_cfg = cfg.get('regions', {}).get(selected_region, {})
+            if isinstance(reg_cfg, dict):
+                x_credit = reg_cfg.get('xmltv_credit')
+                if x_credit:
+                    x_credit_url = reg_cfg.get('xmltv_credit_url', 'no_url')
+                    if x_credit_url not in xmltv_credits:
+                        xmltv_credits[x_credit_url] = {'names': [], 'credit': x_credit}
+                    xml_label = f"{p_id.upper()} ({selected_region.upper()})"
+                    if xml_label not in xmltv_credits[x_credit_url]['names']:
+                        xmltv_credits[x_credit_url]['names'].append(xml_label)
+
+    if not provider_credits and not xmltv_credits:
+        return
+
+    script_name = os.path.basename(sys.argv[0])
+    print("\n" + "═" * 80)
+    print(f" COMPLETED! THANK YOU FOR USING {script_name.upper()}")
+    print(" This script relies on community-maintained data sources and code.")
+    print(" If you find these lists helpful, please consider supporting the creators:")
+    print("─" * 80)
+
+    if provider_credits:
+        print(f"{'STREAM PROVIDER':<25} | {'CREDIT':<20} | {'LINK / DONATE'}")
+        print("─" * 80)
+        for d_url, info in provider_credits.items():
+            names = ", ".join(info['names'])
+            url = d_url if d_url != 'no_url' else "No link available"
+            print(f"{names:<25} | {info['credit']:<20} | {url}")
+
+    if xmltv_credits:
+        print("\n" + f"{'EPG / XMLTV SOURCE':<25} | {'CREDIT':<20} | {'LINK / DONATE'}")
+        print("─" * 80)
+        for d_url, info in xmltv_credits.items():
+            names = ", ".join(info['names'])
+            url = d_url if d_url != 'no_url' else "No link available"
+            print(f"{names:<25} | {info['credit']:<20} | {url}")
+
+    print("═" * 80 + "\n")
 
 def reload_enigma2():
     """
@@ -1192,12 +1335,38 @@ def main():
     # Initialize requested services
     services = []
 
+    # Now start the actual processing
     if "all" in selected_providers or "plutotv" in selected_providers:
+        if args.plutotv_legacy:
+            def pluto_fetch(mode):
+                """Legacy fetcher wrapper using the old boot URL."""
+                return fetch_plutotv_data_legacy(
+                    args.plutotv_source_legacy, args.plutotv_id_type, mode, args.debug
+                )
+
+            def pluto_epg(c_file, s_file, srv_name):
+                """Legacy EPG wrapper."""
+                return generate_epg_source(
+                    conf_dir, s_file, c_file, 'plutotv', srv_name,
+                    PROVIDER_CONFIG['plutotv']['regions']
+                )
+        else:
+            def pluto_fetch(mode):
+                """New API fetcher wrapper using the MJH JSON URL."""
+                return fetch_plutotv_data(args.plutotv_source, args.plutotv_region, args.debug)
+
+            def pluto_epg(c_file, s_file, srv_name):
+                """New API EPG wrapper."""
+                return generate_epg_source(
+                    conf_dir, s_file, c_file, 'plutotv', srv_name,
+                    [args.plutotv_region]
+                )
+
         services.append({
             'id': 'plutotv',
             'name': args.plutotv_provider_name,
-            'fetch_func': lambda mode: fetch_plutotv_data(args.plutotv_source, args.plutotv_id_type, mode, args.debug),
-            'epg_func': lambda c_file, s_file, srv_name: generate_epg_source(conf_dir, s_file, c_file, 'plutotv', srv_name, PROVIDER_CONFIG['plutotv']['regions'])
+            'fetch_func': pluto_fetch,
+            'epg_func': pluto_epg
         })
 
     if "all" in selected_providers or "rakutentv" in selected_providers:
@@ -1376,6 +1545,12 @@ def main():
 
     if not args.not_reload and not args.playlist_only:
         reload_enigma2()
+
+    logging.info("Generation finished successfully.")
+
+    # Print donation hints for all selected providers if not in quiet mode
+    if not args.quiet:
+        display_credits(services, args)
 
 if __name__ == "__main__":
     main()
